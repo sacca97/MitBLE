@@ -15,7 +15,6 @@ from sniffle.sniffle_hw import (SniffleHW, BLE_ADV_AA, PacketMessage, DebugMessa
 from sniffle.packet_decoder import DPacketMessage, ConnectIndMessage, LlDataContMessage
 from sniffle.relay_protocol import connect_relay, MessageType
 
-from mitble_help import LegacyMitm
 # global variable to access hardware
 hw = None
 _aa = 0
@@ -43,7 +42,6 @@ def main():
 
     conn = connect_relay(args.masteraddr)
     print("Connected to master.")
-    mitm = LegacyMitm(key_size=4)
     
 
     # Network latency test
