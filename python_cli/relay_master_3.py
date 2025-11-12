@@ -6,6 +6,7 @@
 # Released as open source under GPLv3
 
 import argparse, sys, signal
+import serial
 from binascii import unhexlify
 from queue import Queue
 from time import time
@@ -104,10 +105,14 @@ def main():
     aparse.add_argument("-F", "--fastmaster", action="store_const", default=False, const=True,
             help="Relay master should specify a fast connection interval")
     aparse.add_argument("-o", "--output", default=None, help="PCAP output file name")
+    aparse.add_argument("--periph-serial", default=None,
+        help="Serial port of the REAL peripheral (e.g. COM7 or /dev/ttyACM0)")
+    aparse.add_argument("--periph-baud", type=int, default=115200,
+        help="Baudrate for the REAL peripheral (default: 115200)")
     args = aparse.parse_args()
-
     global hw
     hw = SniffleHW(args.serport)
+
 
     # put the hardware in a normal state (passive scanning) and configure it with an impossibly
     # high RSSI threshold so that it captures nothing (to avoid filling receive buffers)
@@ -179,7 +184,14 @@ def main():
     # buffer while waiting for connection from relay slave
     hw.setup_sniffer(mode=SnifferMode.PASSIVE_SCAN, rssi_min=0)
 
-    # Pause until key press if option selected
+    if args.periph_serial:
+        try:
+            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
+                ser.write(b'0')
+            print(f"[UART->PERIPH] Sent '0' to {args.periph_serial} (pause advertising).")
+        except Exception as e:
+            print(f"[UART->PERIPH] WARNING: could not send '0' on {args.periph_serial}: {e}", file=sys.stderr)
+
     if args.pause:
         input("Press enter to continue...")
     conn.send_msg(MessageType.PING, b'')
@@ -194,6 +206,15 @@ def main():
     conn_req = DPacketMessage.from_body(body)
     if not isinstance(conn_req, ConnectIndMessage):
         raise ValueError("CONN_REQ was not a CONN_REQ!")
+
+    if args.periph_serial:
+        try:
+            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
+                ser.write(b'1')
+            print(f"[UART->PERIPH] Sent '1' to {args.periph_serial} (resume advertising).")
+        except Exception as e:
+            print(f"[UART->PERIPH] WARNING: could not send '1' on {args.periph_serial}: {e}", file=sys.stderr)
+
     print("Relay slave notified us of connection request. Connecting to real target...")
     print(conn_req)
 
@@ -238,6 +259,7 @@ def main():
         msg = hw.recv_and_decode()
         print(msg)
         if isinstance(msg, StateMessage) and msg.new_state == SnifferState.CENTRAL:
+            print("Inside if")
             hw.decoder_state.cur_aa = conn_req.aa_conn
             break
     print("Connected to target.", end='\n\n')

