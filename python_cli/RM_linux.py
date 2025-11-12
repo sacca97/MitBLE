@@ -420,6 +420,8 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
             ll_before = msg.body
             ll_after, ch3 = mitm.rewrite_ll_body(ll_before, direction="to_central")
             if ch3:
+                print(f"[MITM] to_central: LL before ({len(ll_before)} bytes): {_hex_bytes(ll_before)}")
+                print(f"[MITM] to_central: LL after  ({len(ll_after)} bytes):  {_hex_bytes(ll_after)}")
                 msg.body = ll_after
 
         if not empty and not block_req:
