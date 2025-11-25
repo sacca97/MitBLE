@@ -400,6 +400,9 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
                 msg.body = new_ll
                 # Also rewrite SMP Confirm/Random in periph->central direction
+        if not empty and not block_req:
+            # Forward packets to the relay slave
+            conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
         if block_req:
             # LL_REJECT_EXT_IND, unacceptable connection parameters
             hw.cmd_transmit(3, b'\x11\x0F\x3B')
