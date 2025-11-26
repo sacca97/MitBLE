@@ -106,6 +106,10 @@ ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
 ivs_from_p = None   # IVs from real peripheral P (P -> C_r, LL_ENC_RSP)
 iv_real_cp = None   # IVm_from_c || IVs_from_p
 
+skdm_from_c  = None
+skds_from_p  = None
+skd_real_cp  = None
+
 def sigint_handler(sig, frame):
     hw.cancel_recv()
     hw.cmd_chan_aa_phy() # stop scanning or connection
@@ -394,24 +398,39 @@ def _extract_smp_key_size_from_ll_body(ll_body: bytes):
     return (smp_code, smp[4])
 
 
-def _extract_ivm_from_ll_enc_req(ctrl: LlControlMessage):
+def _extract_skd_iv_from_ll_enc_req(ctrl: LlControlMessage):
     """
-    LL_ENC_REQ (0x03), length 23, just take the last 4 bytes.
+    LL_ENC_REQ (0x03), total length 23 bytes:
+        opcode | RAND(8) | EDIV(2) | SKDm(8) | IVm(4)
+
+    Returns (SKDm, IVm) or (None, None) on mismatch.
     """
     body = ctrl.body
     if ctrl.opcode != 0x03 or len(body) < 23:
-        return None
-    return body[-4:]  # bytes 19..22
+        return None, None
+
+    # Last 12 bytes = SKDm(8) || IVm(4)
+    skdm = body[-12:-4]  # bytes 11..18
+    ivm  = body[-4:]     # bytes 19..22
+    return skdm, ivm
 
 
-def _extract_ivs_from_ll_enc_rsp(ctrl: LlControlMessage):
+def _extract_skd_iv_from_ll_enc_rsp(ctrl: LlControlMessage):
     """
-    LL_ENC_RSP (0x04), length 3, just take the last 4 bytes.
+    LL_ENC_RSP (0x04), total length 13 bytes:
+        opcode | SKDs(8) | IVs(4)
+
+    Returns (SKDs, IVs) or (None, None) on mismatch.
     """
     body = ctrl.body
     if ctrl.opcode != 0x04 or len(body) < 13:
-        return None
-    return body[-4:]  # bytes 9..12
+        return None, None
+
+    # Last 12 bytes = SKDs(8) || IVs(4)
+    skds = body[-12:-4]  # bytes 1..8
+    ivs  = body[-4:]     # bytes 9..12
+    return skds, ivs
+
 
 
 def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
@@ -421,6 +440,7 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     global link_encryption_active, enc_ctr_p_to_c, enc_ctr_c_to_p
     global last_sn_p_to_c, last_sn_c_to_p
     global last_pdu_p_to_c, last_pdu_c_to_p   # NEW: track last PDU bytes per direction
+    global skdm_from_c, skds_from_p, skd_real_cp
 
     msg = hw.recv_and_decode()
 
@@ -580,15 +600,27 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
 
 
         # LL_ENC_RSP from P to extract IV
+        # Handle LL_ENC_RSP from real peripheral (P->C_r)
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
-            ivs = _extract_ivs_from_ll_enc_rsp(msg)
+            skds, ivs = _extract_skd_iv_from_ll_enc_rsp(msg)
+
             if ivs is not None:
                 ivs_from_p = ivs
                 print(f"[IV] IVs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(ivs_from_p)}")
 
+            if skds is not None:
+                skds_from_p = skds
+                print(f"[SKD] SKDs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(skds_from_p)}")
+
+            # Combine IV when we have both halves
             if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
                 iv_real_cp = ivm_from_c + ivs_from_p
                 print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
+
+            # Combine SKD when we have both halves
+            if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
+                skd_real_cp = skdm_from_c + skds_from_p
+                print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
 
         # Downgrade entropy (max key size parameter)
         if not empty and not block_req and isinstance(msg, DataMessage):
@@ -619,6 +651,7 @@ def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     global enc_start_seen, first_enc_rsp_pkt
     global ivm_from_c, ivs_from_p, iv_real_cp
     global uart_test_pending, uart_last_seq
+    global skdm_from_c, skds_from_p, skd_real_cp
 
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
@@ -654,21 +687,32 @@ def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
     pkt.aa = hw.decoder_state.cur_aa
     pkt.event = event
 
-    # LL_ENC_REQ from P to extract IV
+    # Handle LL_ENC_REQ from real central (C->P_r)
     if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x03:
-        ivm = _extract_ivm_from_ll_enc_req(pkt)
+        skdm, ivm = _extract_skd_iv_from_ll_enc_req(pkt)
+
         if ivm is not None:
             ivm_from_c = ivm
             print(f"[IV] IVm from real central (LL_ENC_REQ on C->P_r): {_hx(ivm_from_c)}")
 
+        if skdm is not None:
+            skdm_from_c = skdm
+            print(f"[SKD] SKDm from real central (LL_ENC_REQ on C->P_r): {_hx(skdm_from_c)}")
+
+        # Combine IV when we have both halves
         if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
             iv_real_cp = ivm_from_c + ivs_from_p
             print(f"[IV] Combined real C<->P IV (IVm||IVs): {_hx(iv_real_cp)}")
 
-    # Passing on PDUs with instants in the past would break the connection
-    if not (filter_changes and has_instant(pkt)):
-        hw.cmd_transmit(llid, pdu, event)
-    print_message(pkt, quiet)
+        # Combine SKD when we have both halves
+        if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
+            skd_real_cp = skdm_from_c + skds_from_p
+            print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
+
+        # Passing on PDUs with instants in the past would break the connection
+        if not (filter_changes and has_instant(pkt)):
+            hw.cmd_transmit(llid, pdu, event)
+        print_message(pkt, quiet)
 
 
 def print_message(msg, quiet=False):
