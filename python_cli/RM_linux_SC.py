@@ -439,7 +439,7 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
             last_sn_c_to_p = None
             last_pdu_p_to_c = None      # NEW: also clear last PDU tracking
             last_pdu_c_to_p = None
-            print("Saw LL_START_ENC_RSP on real, packetCounters starts at 0")
+            print("Saw LL_START_ENC_RSP on real, packetCounters starts at -1")
 
         packet_counter = None  # define here so it's visible later
         data_dir = 1           # default, in case msg is not DataMessage
@@ -469,8 +469,8 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                         # P -> C_r
                         if last_sn_p_to_c is None:
                             # First encrypted PDU in this direction
-                            packet_counter = enc_ctr_p_to_c
                             enc_ctr_p_to_c += 1
+                            packet_counter = enc_ctr_p_to_c
                             last_sn_p_to_c = sn_bit
                             last_pdu_p_to_c = pdu
                             print(f"P->C_r FIRST encrypted PDU, packetCounter={packet_counter}")
@@ -493,7 +493,7 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                                 packet_counter = enc_ctr_p_to_c
                                 last_sn_p_to_c = sn_bit  # unchanged but we confirm
                                 last_pdu_p_to_c = pdu
-                                print("P->C_r NEW encrypted PDU (SN same but payload changed) – resyncing packetCounter")
+                                print(f"P->C_r NEW encrypted PDU (SN same but payload changed) – packetCounter={packet_counter}")
 
                     else:
                         # C_r -> P
@@ -549,38 +549,38 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 mic_on_air = payload[-MIC_LEN:]
 
                 VALUE_LEN = 16
-                if len(ciphertext) < VALUE_LEN:
-                    print(f"ERROR: packet too short")
-                    return
+                if len(ciphertext) != VALUE_LEN:
+                    print(f"Ciphertext is not the length we expect")
+        
 
                 print(f"ciphertext: {_hx(ciphertext)}")
                 print(f"MIC (encrypted): {_hx(mic_on_air)}")
 
                 if iv_real_cp is not None and packet_counter is not None:
-                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
-                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
-                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    #nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
+                    #a0 = make_ble_ccm_counter_block(nonce, block_index=1)
+                    #plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    #ciphertext_test = ciphertext[-VALUE_LEN:]
+                    #keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
+                    #print(f"       Plaintext for HULK: {_hx(a0)}")
+                    #print(f"       Ciphertext for HULK: {_hx(keystream)}")
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, 0)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=2)
+                    plaintext_test = bytes(16)
                     ciphertext_test = ciphertext[-VALUE_LEN:]
                     keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
                     print(f"       Plaintext for HULK: {_hx(a0)}")
                     print(f"       Ciphertext for HULK: {_hx(keystream)}")
                     nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter+1, direction_bit)
-                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
-                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
-                    ciphertext_test = ciphertext[-VALUE_LEN:]
-                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
-                    print(f"       Plaintext for HULK: {_hx(a0)}")
-                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
-                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter+2, direction_bit)
-                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
-                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=2)
+                    plaintext_test = bytes(16)
                     ciphertext_test = ciphertext[-VALUE_LEN:]
                     keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
                     print(f"       Plaintext for HULK: {_hx(a0)}")
                     print(f"       Ciphertext for HULK: {_hx(keystream)}")
                     nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter-1, direction_bit)
-                    a0 = make_ble_ccm_counter_block(nonce, block_index=1)
-                    plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
+                    a0 = make_ble_ccm_counter_block(nonce, block_index=2)
+                    plaintext_test = bytes(16)
                     ciphertext_test = ciphertext[-VALUE_LEN:]
                     keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
                     print(f"       Plaintext for HULK: {_hx(a0)}")
