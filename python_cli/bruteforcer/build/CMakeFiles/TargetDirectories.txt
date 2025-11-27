@@ -1,4 +1,0 @@
-/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles/bruteforcer_OpenMP.dir
-/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles/bruteforcer.dir
-/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles/edit_cache.dir
-/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles/rebuild_cache.dir

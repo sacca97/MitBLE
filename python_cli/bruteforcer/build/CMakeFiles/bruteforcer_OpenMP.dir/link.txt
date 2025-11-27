@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o -o bruteforcer_OpenMP  /usr/lib64/libcrypto.so /usr/lib/gcc/x86_64-redhat-linux/11/libgomp.so /usr/lib64/libpthread.a 
