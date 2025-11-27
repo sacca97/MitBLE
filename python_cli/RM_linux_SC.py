@@ -666,6 +666,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
 
 
         # LL_ENC_RSP from P to extract IV
+        # Handle LL_ENC_RSP from real peripheral (P->C_r)
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
             skds, ivs = _extract_skd_iv_from_ll_enc_rsp(msg)
 
@@ -752,7 +753,7 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
     pkt.aa = hw.decoder_state.cur_aa
     pkt.event = event
 
-    # LL_ENC_REQ from P to extract IV
+    # Handle LL_ENC_REQ from real central (C->P_r)
     if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x03:
         skdm, ivm = _extract_skd_iv_from_ll_enc_req(pkt)
 
