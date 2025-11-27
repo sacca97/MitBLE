@@ -92,7 +92,7 @@ def ble_ccm_encrypt(key: bytes,
 
 def make_ble_ccm_nonce(iv: bytes, packet_counter: int, direction_bit: int) -> bytes:
     """
-    Construct the 13-byte BLE CCM nonce.
+    Construct the 13-byte BLE CCM nonce, nonce is provided LSO -> MSO (not as in the SPEC, but same convention as NIMBLE)
     """
     if not (0 <= packet_counter < (1 << 39)):
         raise ValueError("packet_counter must fit in 39 bits")
@@ -102,15 +102,18 @@ def make_ble_ccm_nonce(iv: bytes, packet_counter: int, direction_bit: int) -> by
         raise ValueError("iv must be exactly 8 bytes")
 
     # Lower 32 bits of packetCounter
+    # Should have LSO of counter at nonce0 and second MSO at nonce3 (SPEC p2768) 
     n0 = (packet_counter >> 0) & 0xFF
     n1 = (packet_counter >> 8) & 0xFF
     n2 = (packet_counter >> 16) & 0xFF
     n3 = (packet_counter >> 24) & 0xFF
 
-    # Upper 7 bits of packetCounter + direction in MSB
+    # Upper 7 bits of packetCounter + direction in MSB forms nonce4 (SPEC p2768) 
     pc_high7 = (packet_counter >> 32) & 0x7F
     n4 = pc_high7 | (direction_bit << 7)
 
+    # Should have MSO of IV at nonce12 and LSO at nonce5 (SPEC p2768) 
+    # Index 0 is nonce0, index 13 is nonce 13 (SPEC p2768)
     return bytes([n0, n1, n2, n3, n4]) + iv
 
 
@@ -128,7 +131,8 @@ def make_ble_ccm_counter_block(nonce: bytes, block_index: int) -> bytes:
     
     ctr_msb = (block_index >> 8) & 0xFF  # A[14]
     ctr_lsb = block_index & 0xFF         # A[15]
-
+    
+    # nonce should have nonce0 at position 1 and nonce13 at position 14 (SPEC p2769)
     return bytes([flags]) + nonce + bytes([ctr_msb, ctr_lsb])
 
 
