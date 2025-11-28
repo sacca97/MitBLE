@@ -83,7 +83,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
-new_key_size = 0x03
+new_key_size = 0x05
 
 found_key = None                  
 _found_key_lock = threading.Lock()

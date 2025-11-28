@@ -107,9 +107,9 @@ int main(int argc, char **argv) {
         const int key_size   = static_cast<int>(d.key_size);
         const int zero_bytes = 16 - key_size;
 
-        if (key_size > 4) {
+        if (key_size > 6) {
             std::cerr << "key_size = " << key_size
-                      << " is too large for this naive bruteforcer (4 bytes takes already 10 min).\n";
+                      << " is too large for this naive bruteforcer.\n";
             return 1;
         }
 
