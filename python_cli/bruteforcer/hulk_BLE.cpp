@@ -366,7 +366,7 @@ static void BruteforceMissingBytes(const uint8_t Input[16], const uint8_t Expect
 
 int main(int argc, char **argv) {
   //CHANGED FOR BLE: 
-  bool Enc = false;
+  bool Enc = true;
   int KeyScheduleRound = 0;
   uint8_t plaintext[16]  = {0};
   uint8_t ciphertext[16] = {0};
