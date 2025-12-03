@@ -13,6 +13,9 @@ project(bruteforcer_suite
     LANGUAGES CXX
 )
 
+# === NEW: option to enable AES-NI ===
+option(USE_AESNI "Enable AES-NI acceleration" OFF)
+
 # --- C++ standard ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +65,11 @@ target_link_libraries(hulk_BLE
         Threads::Threads
 )
 
+# if AES-NI is enabled, define USE_AESNI for all targets 
+if (USE_AESNI)
+    target_compile_definitions(bruteforcer_OpenMP PRIVATE USE_AESNI)
+endif()
+
 # --- Compiler optimizations (for GCC/Clang) ---
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bruteforcer_OpenMP
@@ -74,7 +82,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             $<$<CONFIG:Release>:-O3 -march=native -mtune=native>
             -Wall -Wextra -Wpedantic
     )
-    #Use the same options as the HULK documentation
+    # Use the same options as the HULK documentation
     target_compile_options(hulk_BLE
         PRIVATE
             -O3 -march=native -fms-extensions -g

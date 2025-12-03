@@ -230,7 +230,10 @@ PKG_CONFIG_ARGN:STRING=
 PKG_CONFIG_EXECUTABLE:FILEPATH=/usr/bin/pkg-config
 
 //No help, variable specified on the command line.
-USE_AESNI:UNINITIALIZED=ON
+USE_AESIN:UNINITIALIZED=ON
+
+//Enable AES-NI acceleration
+USE_AESNI:BOOL=1
 
 //Value Computed by CMake
 bruteforcer_suite_BINARY_DIR:STATIC=/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build

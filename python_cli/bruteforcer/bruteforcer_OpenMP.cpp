@@ -10,7 +10,7 @@
 #include <atomic>
 #include <cstring>        
 #include <omp.h>  
-//AES-NI instruction from HULK   
+//AES-NI from HULK   
 #ifdef USE_AESNI
 #include <wmmintrin.h>
 #include "aesni.h"
