@@ -8,7 +8,7 @@ python3 RS_linux.py -s /dev/ttyACM2 -M 127.0.0.1 -q
 
 
 MASTER
-python3 RM_linux_SC_BF.py -s /dev/ttyACM0 -m F4:ED:F6:E0:BC:78 -o master.pcap -p -q --periph-serial /dev/ttyACM4
+python3 RM_linux_SC.py -s /dev/ttyACM0 -m F4:ED:F6:E0:BC:78 -o master.pcap -p -q --periph-serial /dev/ttyACM4
 
 SLAVE
 python3 RS_linux.py -s /dev/ttyACM2 -M 127.0.0.1 -q

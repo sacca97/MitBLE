@@ -73,15 +73,15 @@ CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o: CMakeFiles/bruteforcer.dir/flags.m
 CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o: /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp
 CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o: CMakeFiles/bruteforcer.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o -MF CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o.d -o CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o -c /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp
+	/usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o -MF CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o.d -o CMakeFiles/bruteforcer.dir/bruteforcer.cpp.o -c /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp
 
 CMakeFiles/bruteforcer.dir/bruteforcer.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/bruteforcer.dir/bruteforcer.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp > CMakeFiles/bruteforcer.dir/bruteforcer.cpp.i
+	/usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp > CMakeFiles/bruteforcer.dir/bruteforcer.cpp.i
 
 CMakeFiles/bruteforcer.dir/bruteforcer.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bruteforcer.dir/bruteforcer.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp -o CMakeFiles/bruteforcer.dir/bruteforcer.cpp.s
+	/usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer.cpp -o CMakeFiles/bruteforcer.dir/bruteforcer.cpp.s
 
 # Object files for target bruteforcer
 bruteforcer_OBJECTS = \

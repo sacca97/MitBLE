@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
+# --- Prefer Clang as the compiler (must be BEFORE project()) ---
+if (NOT CMAKE_C_COMPILER)
+    set(CMAKE_C_COMPILER clang)
+endif()
+if (NOT CMAKE_CXX_COMPILER)
+    set(CMAKE_CXX_COMPILER clang++)
+endif()
+
 project(bruteforcer_suite
     VERSION 1.0
     LANGUAGES CXX
@@ -15,6 +23,9 @@ find_package(OpenSSL REQUIRED Crypto)
 
 # --- Find OpenMP (optional but recommended) ---
 find_package(OpenMP)
+
+# --- Find pthreads for hulk_BLE ---
+find_package(Threads REQUIRED)
 
 # === Executable 1: bruteforcer_OpenMP ===
 add_executable(bruteforcer_OpenMP
@@ -41,6 +52,16 @@ target_link_libraries(bruteforcer
         OpenSSL::Crypto
 )
 
+# === Executable 3: hulk_BLE ===
+add_executable(hulk_BLE
+    hulk_BLE.cpp
+)
+
+target_link_libraries(hulk_BLE
+    PRIVATE
+        Threads::Threads
+)
+
 # --- Compiler optimizations (for GCC/Clang) ---
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bruteforcer_OpenMP
@@ -51,6 +72,12 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bruteforcer
         PRIVATE
             $<$<CONFIG:Release>:-O3 -march=native -mtune=native>
+            -Wall -Wextra -Wpedantic
+    )
+    #Use the same options as the HULK documentation
+    target_compile_options(hulk_BLE
+        PRIVATE
+            -O3 -march=native -fms-extensions -g
             -Wall -Wextra -Wpedantic
     )
 endif()

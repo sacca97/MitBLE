@@ -9,7 +9,16 @@
 #include <openssl/aes.h>
 #include <atomic>
 #include <cstring>        
-#include <omp.h>          
+#include <omp.h>  
+//AES-NI instruction from HULK   
+#ifdef USE_AESNI
+#include <wmmintrin.h>
+#include "aesni.h"
+#endif   
+
+//Set to True if AES-NI instruction is available
+
+
 
 // Struct to represent attack data
 // - key size is the amount of non zero bytes in the key 
@@ -29,16 +38,29 @@ struct AttackData {
 // - key is the aes 128 key
 // - in is the plaintext
 // - out is the ciphertext
-void aes128_ecb_encrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]){
-    AES_KEY aes_key;
-    if (AES_set_encrypt_key(key, 128, &aes_key) != 0) {
-        throw std::runtime_error("AES_set_encrypt_key failed");
-    }
-    AES_encrypt(in, out, &aes_key);
+// - uses AES-IN explicitely when USE_AESNI is defined, else use OpenSSL
+// - (AES-IN unit is then accesed by aesin header from HULK) 
+inline void aes128_ecb_encrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]){
+    #ifdef USE_AESNI
+        __m128i ks[20];  
+        aes128_load_key_enc_only(key, ks);
+
+        __m128i m = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in));
+        m = aes128_enc_fast(ks, m);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out), m);
+
+    #else
+        AES_KEY aes_key;
+        if (AES_set_encrypt_key(key, 128, &aes_key) != 0) {
+            throw std::runtime_error("AES_set_encrypt_key failed");
+        }
+        AES_encrypt(in, out, &aes_key);
+    #endif
 }
 
-// Function to load the attack data, returns a AttackData struct
+// Function to load the attack data
 // - path is the path to the file that contains the attack data (file should contain 49 bytes)
+// - returns keysize, plaintext, ciphertex and session key diversifier (SKD) as an AttackData struct
 AttackData load_attack_data(const std::string &path) {
     AttackData d{};
     std::ifstream f(path, std::ios::binary);

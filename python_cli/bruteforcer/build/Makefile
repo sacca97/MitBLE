@@ -142,6 +142,19 @@ bruteforcer/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bruteforcer.dir/build.make CMakeFiles/bruteforcer.dir/build
 .PHONY : bruteforcer/fast
 
+#=============================================================================
+# Target rules for targets named hulk_BLE
+
+# Build rule for target.
+hulk_BLE: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 hulk_BLE
+.PHONY : hulk_BLE
+
+# fast build rule for target.
+hulk_BLE/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/hulk_BLE.dir/build.make CMakeFiles/hulk_BLE.dir/build
+.PHONY : hulk_BLE/fast
+
 bruteforcer.o: bruteforcer.cpp.o
 .PHONY : bruteforcer.o
 
@@ -190,6 +203,30 @@ bruteforcer_OpenMP.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bruteforcer_OpenMP.dir/build.make CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.s
 .PHONY : bruteforcer_OpenMP.cpp.s
 
+hulk_BLE.o: hulk_BLE.cpp.o
+.PHONY : hulk_BLE.o
+
+# target to build an object file
+hulk_BLE.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/hulk_BLE.dir/build.make CMakeFiles/hulk_BLE.dir/hulk_BLE.cpp.o
+.PHONY : hulk_BLE.cpp.o
+
+hulk_BLE.i: hulk_BLE.cpp.i
+.PHONY : hulk_BLE.i
+
+# target to preprocess a source file
+hulk_BLE.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/hulk_BLE.dir/build.make CMakeFiles/hulk_BLE.dir/hulk_BLE.cpp.i
+.PHONY : hulk_BLE.cpp.i
+
+hulk_BLE.s: hulk_BLE.cpp.s
+.PHONY : hulk_BLE.s
+
+# target to generate assembly for a file
+hulk_BLE.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/hulk_BLE.dir/build.make CMakeFiles/hulk_BLE.dir/hulk_BLE.cpp.s
+.PHONY : hulk_BLE.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -200,12 +237,16 @@ help:
 	@echo "... rebuild_cache"
 	@echo "... bruteforcer"
 	@echo "... bruteforcer_OpenMP"
+	@echo "... hulk_BLE"
 	@echo "... bruteforcer.o"
 	@echo "... bruteforcer.i"
 	@echo "... bruteforcer.s"
 	@echo "... bruteforcer_OpenMP.o"
 	@echo "... bruteforcer_OpenMP.i"
 	@echo "... bruteforcer_OpenMP.s"
+	@echo "... hulk_BLE.o"
+	@echo "... hulk_BLE.i"
+	@echo "... hulk_BLE.s"
 .PHONY : help
 
 

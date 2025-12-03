@@ -73,15 +73,15 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: CMakeFiles/bruteforc
 CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp
 CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: CMakeFiles/bruteforcer_OpenMP.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o -MF CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o.d -o CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o -c /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp
+	/usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o -MF CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o.d -o CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o -c /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp
 
 CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp > CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.i
+	/usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp > CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.i
 
 CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp -o CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.s
+	/usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/bruteforcer_OpenMP.cpp -o CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.s
 
 # Object files for target bruteforcer_OpenMP
 bruteforcer_OpenMP_OBJECTS = \
@@ -93,8 +93,8 @@ bruteforcer_OpenMP_EXTERNAL_OBJECTS =
 bruteforcer_OpenMP: CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o
 bruteforcer_OpenMP: CMakeFiles/bruteforcer_OpenMP.dir/build.make
 bruteforcer_OpenMP: /usr/lib64/libcrypto.so
-bruteforcer_OpenMP: /usr/lib/gcc/x86_64-redhat-linux/11/libgomp.so
-bruteforcer_OpenMP: /usr/lib64/libpthread.a
+bruteforcer_OpenMP: /lib64/libomp.so
+bruteforcer_OpenMP: /lib64/libpthread.a
 bruteforcer_OpenMP: CMakeFiles/bruteforcer_OpenMP.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable bruteforcer_OpenMP"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/bruteforcer_OpenMP.dir/link.txt --verbose=$(VERBOSE)
