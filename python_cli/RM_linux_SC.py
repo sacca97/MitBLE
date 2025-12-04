@@ -509,28 +509,27 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
 
         # LL_START_ENC_REQ / RSP (opcode 0x05) on this link, packetCounters are reset.
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:
+            #New encryption session, reset counters
             link_encryption_active = True
             enc_ctr_p_to_c = -1
             enc_ctr_c_to_p = -1
             last_sn_p_to_c = None
             last_sn_c_to_p = None
-            last_pdu_p_to_c = None      # NEW: also clear last PDU tracking
+            last_pdu_p_to_c = None      
             last_pdu_c_to_p = None
             print("Saw LL_START_ENC_RSP on real, packetCounters starts at -1")
 
         packet_counter = None  # define here so it's visible later
-        data_dir = 1           # default, in case msg is not DataMessage
+        data_dir = 1           # Sniffle uses 1, but BLE convention uses direction bit 0
 
         if isinstance(msg, DataMessage):
             # data_dir to indicate direction:
-            #   1 = slave -> master (P -> C_r)
-            #   0 = master -> slave (C_r -> P)
             data_dir = getattr(msg, "data_dir", 0)
             pdu = msg.body
 
             if len(pdu) < 2:
                 print("Data PDU too short for header")
-                has_payload = False   # NEW: avoid use-before-assign
+                has_payload = False  
             else:
                 hdr0 = pdu[0]
                 length = pdu[1]
@@ -540,6 +539,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                 sn_bit = (hdr0 >> 2) & 0x01
 
                 if link_encryption_active and has_payload:
+                    #Omly increment
                     print(f"State of uart: {uart_test_pending}")
 
                     if data_dir == 1:
@@ -665,6 +665,8 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                         )
 
 
+
+
         # LL_ENC_RSP from P to extract IV
         # Handle LL_ENC_RSP from real peripheral (P->C_r)
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
@@ -719,6 +721,7 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
     global uart_test_pending, uart_last_seq
     global skd_real_cp, skdm_from_c, skds_from_p
     global new_key_size
+    global link_encryption_active
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:
@@ -774,6 +777,19 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
         if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
             skd_real_cp = skdm_from_c + skds_from_p
             print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
+
+    #Check for LL_PAUSE_ENC_RSP
+    if isinstance(msg, LlControlMessage) and msg.opcode == 0x0b:
+        #New session key, so new IV and SKD, 
+        #Link is not encrypted anymore
+        ivm_from_c = None   
+        ivs_from_p = None   
+        iv_real_cp = None   
+        skdm_from_c  = None
+        skds_from_p  = None
+        skd_real_cp  = None
+        link_encryption_active = False
+
     # Passing on PDUs with instants in the past would break the connection
     if not (filter_changes and has_instant(pkt)):
         hw.cmd_transmit(llid, pdu, event)

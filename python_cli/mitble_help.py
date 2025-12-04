@@ -5,6 +5,9 @@ _SMP_CID = 0x0006
 _SMP_PAIRING_REQ = 0x01
 _SMP_PAIRING_RSP = 0x02
 
+
+
+
 def _rewrite_ll_l2cap_smp(ll_body: bytes, new_key_size: int = 0x04):
     """
     Rewrites SMP Pairing Req/Resp max enc size to new_key_size.
@@ -67,6 +70,20 @@ def downgrade_pairing_request(ll_body: bytes, new_key_size: int = 0x04):
 def mask_ll_header_first_octet(hdr0: int) -> int:
     # Zero NESN, SN, MD bits (2,3,4)
     return hdr0 & ~0x1C
+
+
+
+def aes128_ecb_encrypt(key: bytes, block: bytes) -> bytes:
+    """
+    AES-128 ECB encrypt a single 16-byte block with a 16-byte key.
+    Returns the 16-byte ciphertext block.
+    """
+    if len(key) != 16:
+        raise ValueError(f"AES-128 key must be 16 bytes, got {len(key)}")
+    if len(block) != 16:
+        raise ValueError(f"Plaintext block must be 16 bytes, got {len(block)}")
+    cipher = AES.new(key, AES.MODE_ECB)
+    return cipher.encrypt(block)
 
 
 def ble_ccm_encrypt(key: bytes,
@@ -134,5 +151,73 @@ def make_ble_ccm_counter_block(nonce: bytes, block_index: int) -> bytes:
     
     # nonce should have nonce0 at position 1 and nonce13 at position 14 (SPEC p2769)
     return bytes([flags]) + nonce + bytes([ctr_msb, ctr_lsb])
+    
 
 
+MIC_LEN = 4  # BLE uses 4-byte MIC
+
+def decrypt_encrypted_pdu(session_key: bytes,
+                          iv: bytes,
+                          packet_counter: int,
+                          direction_bit: int,
+                          pdu: bytes):
+    """
+    Decrypt one BLE encrypted LL Data PDU
+    Returns plaintext_bytes or None
+    """
+
+    if len(pdu) < 2:
+        print("[DECRYPT] PDU too short")
+        return None
+
+    hdr0 = pdu[0]
+    length = pdu[1]
+
+    if length == 0:
+        print("[DECRYPT] Empty packet: should not be detected to decrypt")
+        return None
+
+    if len(pdu) < 2 + length:
+        print(f"[DECRYPT] PDU truncated: len(pdu)={len(pdu)}, header length={length}")
+        return None
+
+    payload_plus_mic = pdu[2:2 + length]
+
+    if len(payload_plus_mic) <= MIC_LEN:
+        print("[DECRYPT] payload too short: no data, only MIC (Something went wrong)")
+        return None
+
+    ciphertext = payload_plus_mic[:-MIC_LEN]
+    mic_encrypted = payload_plus_mic[-MIC_LEN:]
+
+    # Build nonce 
+    nonce = make_ble_ccm_nonce(iv, packet_counter, direction_bit)
+
+    #
+    plaintext = bytearray()
+    block_index = 1   
+    offset = 0
+
+    while offset < len(ciphertext):
+        block = ciphertext[offset:offset + 16]
+
+        counter_block = make_ble_ccm_counter_block(nonce, block_index=block_index)
+        keystream_block = aes128_ecb_encrypt(session_key, counter_block)
+
+        # For the last partial block, only XOR the bytes we actually have
+        k = keystream_block[:len(block)]
+        plaintext.extend(c ^ b for c, b in zip(block, k))
+
+        offset += len(block)
+        block_index += 1
+
+    pt_bytes = bytes(plaintext)
+
+    print(
+        f"[DECRYPT] dir={'P->C' if direction_bit == 0 else 'C->P'}, "
+        f"ctr={packet_counter}, ct_len={len(ciphertext)}, pt_len={len(pt_bytes)}"
+    )
+
+    # TODO: check MIC to make sure the data packet is valid (Do not increase counter I think for a wrong packet)
+
+    return pt_bytes
