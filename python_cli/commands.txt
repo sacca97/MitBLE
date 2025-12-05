@@ -18,6 +18,6 @@ okk
 
 bruteforcer
 
-g++ -std=c++17 -O3 bruteforce_ltk.cpp -o bruteforce_ltk -lcrypto
+
 
 

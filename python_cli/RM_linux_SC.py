@@ -359,7 +359,7 @@ def main():
         ready, _, _ = select(fds, [], [])
 
         # Check if LTK is available
-        if not ltk_found
+        if not ltk_found:
             try_load_ltk_from_file()
             try_update_session_key()
 
@@ -453,8 +453,8 @@ def try_load_ltk_from_file():
 
 def try_update_session_key():
     global ltk, ltk_found, session_key, skd_real_cp
-    skd_for_aes = skd_real_cp[::-1]
-    if ltk_found and ltk is not None:
+    if ltk_found and ltk is not None and skd_real_cp is not None:
+        skd_for_aes = skd_real_cp[::-1]
         session_key = aes128_ecb_encrypt(ltk, skd_for_aes)
     return
 
@@ -663,16 +663,17 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                                     reset_ltk_state_for_new_pairing()
 
 
-            # direction bit for CCM nonce:
             # BLE: directionBit = 0 for P->C, 1 for C->P
-            direction_bit = 0 if data_dir == 1 else 1   # FIXED: was always 0 before
+            # Sniffle uses data_dir = 1 for P->C
+            direction_bit = 0 if data_dir == 1 else 1   
 
             if (link_encryption_active and has_payload and packet_counter is not None and ltk_found and session_key is not None and iv_real_cp is not None):
                 pt, mic_ok = decrypt_pdu(session_key, iv_real_cp, packet_counter, direction_bit, pdu)
+                print(f"[DEC] plaintext is {pt} and mic is {mic_ok}")
                 decrypted_payload = pt
                 if not mic_ok:
-                    packet_counter = enc_ctr_c_to_p
-                    enc_ctr_c_to_p += 1
+                    #If MIC does not check out, assume something went wrong over the air, 
+                    enc_ctr_p_to_c -= 1
 
 
             if uart_test_pending and not empty and data_dir == 1:
@@ -815,6 +816,7 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
     global skd_real_cp, skdm_from_c, skds_from_p
     global new_key_size
     global link_encryption_active
+    global ltk, ltk_found, session_key
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:
@@ -870,9 +872,11 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
         if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
             skd_real_cp = skdm_from_c + skds_from_p
             print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
+            if ltk_found:
+                try_update_session_key()
 
     #Check for LL_PAUSE_ENC_RSP
-    if isinstance(msg, LlControlMessage) and msg.opcode == 0x0b:
+    if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x0b:
         #New session key, so new IV and SKD, 
         #Link is not encrypted anymore
         ivm_from_c = None   

@@ -70,6 +70,17 @@ AttackData load_attack_data(const std::string &path) {
     return d;
 }
 
+// Function to write the LTK to the specified filepath
+// - path is filepath where the LTK will be written to
+// - ltk is the bruteforced LTK  
+void write_ltk(const std::string &path, const uint8_t ltk[16]) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        throw std::runtime_error("cannot open ltk output file: " + path);
+    }
+    f.write(reinterpret_cast<const char*>(ltk), 16);
+}
+
 static uint8_t *CHRHEX = (uint8_t *)
     "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF" \
     "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF" \
@@ -373,15 +384,17 @@ int main(int argc, char **argv) {
   uint8_t key[16]        = {0};
   uint8_t skd[16]        = {0};
 
-  if (argc < 2) {
-    printf("Usage: %s <attack_data_file>\n", argv[0]);
+  if (argc != 3) {
+    printf("Usage: %s <attack_data_file> <ltk_output_file>\n", argv[0]);
     return 1;
   }
+  const std::string attack_data_path = argv[1];
+  const std::string ltk_output_path  = argv[2];
 
   //CHANGED FOR BLE: read data from the attack_data.bin instead of arguments in command line
   AttackData d;
   try {
-    d = load_attack_data(argv[1]);
+    d = load_attack_data(attack_data_path.c_str());
   } catch (const std::exception &e) {
     fprintf(stderr, "Error: %s\n", e.what());
     return 1;
@@ -444,6 +457,8 @@ int main(int argc, char **argv) {
     memcpy(key, &key_schedule_fast[0], 16);    
     phex(key);
   }  
+  
+
 
   //CHANGED FOR BLE: verification is different
   __m128i ks[20];
@@ -469,6 +484,13 @@ int main(int argc, char **argv) {
 
   bool R = (memcmp(out, ciphertext, 16) == 0);
   if (R) {
+      try {
+          write_ltk(ltk_output_path, key);
+          printf("[*] LTK written to: %s\n", ltk_output_path.c_str());
+      } catch (const std::exception &e) {
+          fprintf(stderr, "Error writing LTK: %s\n", e.what());
+          return 1;
+      }
       printf("[!] Valid key!\n");
   } else {
       printf("[!] Wrong key!\n");

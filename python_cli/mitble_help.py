@@ -236,6 +236,7 @@ def ble_ccm_decrypt(session_key: bytes, iv: bytes, packet_counter: int, directio
         (None, False)                on error
     """
 
+    MIC_LEN = 4
     mic_ok = False
     NESN_SN_MD_MASK = (1 << 2) | (1 << 3) | (1 << 4)  
 
