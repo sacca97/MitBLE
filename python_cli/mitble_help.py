@@ -4,9 +4,11 @@ from Crypto.Cipher import AES
 _SMP_CID = 0x0006
 _SMP_PAIRING_REQ = 0x01
 _SMP_PAIRING_RSP = 0x02
+_MIC_LEN = 4  
 
 
-
+def _hx(b: bytes) -> str:
+    return ''.join(f'{x:02x}' for x in b)
 
 def _rewrite_ll_l2cap_smp(ll_body: bytes, new_key_size: int = 0x04):
     """
@@ -154,70 +156,131 @@ def make_ble_ccm_counter_block(nonce: bytes, block_index: int) -> bytes:
     
 
 
-MIC_LEN = 4  # BLE uses 4-byte MIC
+def compute_ble_ccm_encrypted_mic(session_key: bytes,
+                                  nonce: bytes,
+                                  header_first_octet: int,
+                                  plaintext: bytes) -> bytes:
+    """
+    Compute the *encrypted* MIC (the 4 bytes you see on-air) for BLE LL Data PDU.
 
-def decrypt_encrypted_pdu(session_key: bytes,
-                          iv: bytes,
-                          packet_counter: int,
-                          direction_bit: int,
-                          pdu: bytes):
+    - session_key: 16-byte AES-CCM session key (AES_LTK(SKD))
+    - nonce: 13-byte BLE CCM nonce (your make_ble_ccm_nonce output)
+    - header_first_octet: original pdu[0] before masking bits
+    - plaintext: payload bytes (decrypted; without MIC)
+
+    Returns: 4-byte encrypted MIC (U) to compare with on-air MIC.
     """
-    Decrypt one BLE encrypted LL Data PDU
-    Returns plaintext_bytes or None
+
+    if len(nonce) != 13:
+        raise ValueError("nonce must be 13 bytes")
+
+    payload_len = len(plaintext)
+
+    # -------- B0: flags + nonce + payload length --------
+    # BLE: M = 4, L = 2  → flags = 0x49 (per spec, Table 2.2)
+    #   - bits for (M, L) pre-encoded as 0x49
+    #   - Length field is "length of payload", NOT payload+MIC
+    B0 = bytes([0x49]) + nonce + bytes([0x00, payload_len & 0xFF])
+
+    # -------- B1: AAD = masked first header octet --------
+    # AAD length = 1 byte: 0x0001
+    # AAD = header[0] with NESN, SN, MD bits masked to zero.
+    #   NESN bit = 2, SN bit = 3, MD bit = 4  → mask 0b00011100 = 0x1C
+    NESN_SN_MD_MASK = (1 << 2) | (1 << 3) | (1 << 4)
+    aad_byte = header_first_octet & ~NESN_SN_MD_MASK
+
+    B1 = bytes([
+        0x00,               # AAD length MSB
+        0x01,               # AAD length LSB (1 byte of AAD)
+        aad_byte            # AAD (masked header octet)
+    ]) + bytes(13)          # padding to 16 bytes total
+
+    # -------- Payload blocks B2..Bn (CBC-MAC) --------
+    # According to CCM, we MAC the plaintext payload, padded with zeros.
+    payload_blocks = []
+    offset = 0
+    while offset < payload_len:
+        block = plaintext[offset:offset + 16]
+        if len(block) < 16:
+            block = block + bytes(16 - len(block))  # zero pad
+        payload_blocks.append(block)
+        offset += 16
+
+    # CBC-MAC: Y0 = 0^128; Yi = AES(K, Yi-1 XOR Bi)
+    Y = bytes(16)  # 16 zero bytes
+    for block in [B0, B1] + payload_blocks:
+        xored = bytes(a ^ b for a, b in zip(Y, block))
+        Y = aes128_ecb_encrypt(session_key, xored)
+
+    # T = Y (full 16 bytes), MIC = first 4 bytes
+    T = Y
+    T_trunc = T[:MIC_LEN]
+
+    # -------- Encrypt MIC using A0 (counter block i = 0) --------
+    A0 = make_ble_ccm_counter_block(nonce, block_index=0)
+    S0 = aes128_ecb_encrypt(session_key, A0)
+
+    encrypted_mic = bytes(a ^ b for a, b in zip(T_trunc, S0[:MIC_LEN]))
+    return encrypted_mic
+
+
+def ble_ccm_decrypt(session_key: bytes, iv: bytes, packet_counter: int, direction_bit: int, pdu: bytes):
     """
+    Decrypt BLE LL Data PDU using PyCryptodome AES-CCM and verify MIC.
+
+    PDU format:
+        [hdr0][length][ciphertext_payload || encrypted_MIC]
+
+    Returns:
+        (plaintext_payload, mic_ok)   on success
+        (None, False)                on error
+    """
+
+    mic_ok = False
+    NESN_SN_MD_MASK = (1 << 2) | (1 << 3) | (1 << 4)  
 
     if len(pdu) < 2:
-        print("[DECRYPT] PDU too short")
-        return None
+        print("[CCM] PDU too short")
+        return None, False
 
     hdr0 = pdu[0]
     length = pdu[1]
 
+    # No payload, nothing to decrypt/MIC
     if length == 0:
-        print("[DECRYPT] Empty packet: should not be detected to decrypt")
-        return None
+        print("Empty packet, should not be decrypted")
+        return None, False 
 
     if len(pdu) < 2 + length:
-        print(f"[DECRYPT] PDU truncated: len(pdu)={len(pdu)}, header length={length}")
-        return None
+        print(f"[CCM] Truncated PDU: len={len(pdu)}, header length={length}")
+        return None, False
 
     payload_plus_mic = pdu[2:2 + length]
 
     if len(payload_plus_mic) <= MIC_LEN:
-        print("[DECRYPT] payload too short: no data, only MIC (Something went wrong)")
-        return None
+        print("[CCM] payload too short (no data, only MIC?)")
+        return None, False
 
     ciphertext = payload_plus_mic[:-MIC_LEN]
-    mic_encrypted = payload_plus_mic[-MIC_LEN:]
+    mic = payload_plus_mic[-MIC_LEN:]
 
-    # Build nonce 
+    # BLE nonce: 13 bytes constructed from packetCounter + direction + IV
     nonce = make_ble_ccm_nonce(iv, packet_counter, direction_bit)
 
-    #
-    plaintext = bytearray()
-    block_index = 1   
-    offset = 0
+    # AAD is 1 byte: hdr0 with NESN/SN/MD bits masked to 0
+    aad_byte = hdr0 & ~NESN_SN_MD_MASK
+    aad = bytes([aad_byte])
 
-    while offset < len(ciphertext):
-        block = ciphertext[offset:offset + 16]
+    # Now let the library do CCM (MAC+CTR) for us
+    try:
+        cipher = AES.new(session_key, AES.MODE_CCM, nonce=nonce, mac_len=MIC_LEN)
+        cipher.update(aad)                         
+        plaintext = cipher.decrypt_and_verify(ciphertext, mic)
+        mic_ok = True
+    except ValueError as e:
+        # MIC failure, or other CCM issue
+        print(f"[CCM] MIC verification FAILED: {e}")
+        return None, False
 
-        counter_block = make_ble_ccm_counter_block(nonce, block_index=block_index)
-        keystream_block = aes128_ecb_encrypt(session_key, counter_block)
+    return plaintext, mic_ok
 
-        # For the last partial block, only XOR the bytes we actually have
-        k = keystream_block[:len(block)]
-        plaintext.extend(c ^ b for c, b in zip(block, k))
-
-        offset += len(block)
-        block_index += 1
-
-    pt_bytes = bytes(plaintext)
-
-    print(
-        f"[DECRYPT] dir={'P->C' if direction_bit == 0 else 'C->P'}, "
-        f"ctr={packet_counter}, ct_len={len(ciphertext)}, pt_len={len(pt_bytes)}"
-    )
-
-    # TODO: check MIC to make sure the data packet is valid (Do not increase counter I think for a wrong packet)
-
-    return pt_bytes
