@@ -1,1 +1,1 @@
-test_vector_4_bytes_ecb = ('000000000000000000000000????????', b'\x01\x01\x00\x00\x00\x00\xb85\xadh\x1b\x00O\xe6\x00\x02', b'\x87\xd9xf\xdc\xd7\xb1\xfbs\xdeuh\x8e\xc8\x03\xd6')
+test_vector_4_bytes_ecb = ('000000000000000000000000????????', '01010000000034018e12156dbc9c0002', '4d411a9f7be4f30539cd944ccb9e47e3')

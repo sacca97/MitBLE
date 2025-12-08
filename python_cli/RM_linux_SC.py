@@ -993,8 +993,8 @@ def write_tuple_aes_ecb(new_key_size, counter_block, keystream):
 
     data_tuple = (
         ltk_pattern,
-        counter_block,  # bytes
-        keystream       # bytes
+        counter_block.hex(),  
+        keystream.hex()       
     )
 
     filename = os.path.join(out_dir, f"{new_key_size}bytes.py")
