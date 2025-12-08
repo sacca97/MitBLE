@@ -88,7 +88,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
-new_key_size = 0x04
+new_key_size = 0x07
 
 found_key = None                  
 _found_key_lock = threading.Lock()
@@ -786,7 +786,13 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                         key_size = new_key_size
                         exp_dir = create_experiment_dir()
                         write_attack_data_binary(exp_dir, key_size, a0, keystream, skd_for_aes, manager)
-
+                        write_tuple(
+                            key_size,
+                            nonce,
+                            plaintext_test,
+                            ciphertext_test,
+                            skd_for_aes,
+                        )
 
 
 
@@ -951,6 +957,29 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
     if not (filter_changes and has_instant(pkt)):
         hw.cmd_transmit(llid, pdu, event)
     print_message(pkt, quiet)
+
+
+
+def write_tuple(new_key_size, nonce, plaintext_bytes, ciphertext_bytes, skd_for_aes):
+
+    zero_bytes = 16 - new_key_size
+    ltk_pattern = "00" * zero_bytes + "??" * new_key_size   
+
+    os.makedirs("tuple-data", exist_ok=True)
+
+    data_tuple = (
+        ltk_pattern,              
+        skd_for_aes.hex(),        
+        nonce.hex(),              
+        plaintext_bytes.hex(),          
+        ciphertext_bytes.hex()          
+    )
+
+    filename = os.path.join("tuple-data", f"{new_key_size}bytes.py")
+    with open(filename, "w", encoding="ascii") as f:
+        f.write(f"test_vector_{new_key_size}_bytes = ")
+        f.write(repr(data_tuple))
+        f.write("\n")
 
 
 def print_message(msg, quiet=False):
