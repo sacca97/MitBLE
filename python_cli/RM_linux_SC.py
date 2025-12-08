@@ -786,14 +786,14 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                         key_size = new_key_size
                         exp_dir = create_experiment_dir()
                         write_attack_data_binary(exp_dir, key_size, a0, keystream, skd_for_aes, manager)
-                        #write_tuple(
-                        #    key_size,
-                        #    nonce,
-                        #    plaintext_test,
-                        #    ciphertext_test,
-                        #    skd_for_aes,
-                        #)
-                        write_tuple_aes_ecb(key_size, a0, keystream)
+                        write_tuple(
+                            key_size,
+                            a0,
+                            plaintext_test,
+                            ciphertext_test,
+                            skd_for_aes,
+                        )
+                        #write_tuple_aes_ecb(key_size, a0, keystream)
 
 
 

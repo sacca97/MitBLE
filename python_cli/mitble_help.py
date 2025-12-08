@@ -151,7 +151,7 @@ def make_ble_ccm_counter_block(nonce: bytes, block_index: int) -> bytes:
     ctr_msb = (block_index >> 8) & 0xFF  # A[14]
     ctr_lsb = block_index & 0xFF         # A[15]
     
-    # nonce should have nonce0 at position 1 and nonce13 at position 14 (SPEC p2769)
+    # nonce should have nonce0 at position 1 and nonce12 at position 13 (SPEC p2769)
     return bytes([flags]) + nonce + bytes([ctr_msb, ctr_lsb])
     
 
