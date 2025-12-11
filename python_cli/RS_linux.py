@@ -163,8 +163,8 @@ def ser_recv_print_forward(conn, quiet):
         print("LL_ENC_REQ seen, this means that next pairing request should be modified \n")
         seen_pairing_req = True
         LLENCREQ_event = msg.event
-        # Replace LL_ENC_RSP with LL_REJECT_IND if bonding is set
-    if not empty and isinstance(msg, PacketMessage):
+        # Replace pairing request with LL_REJECT_IND if bonding is set
+    if not empty and isinstance(msg, PacketMessage) and False:
         if is_smp_pairing_req(msg.body) and seen_pairing_req: 
             print("[MODIFY] Replacing Pairing request with LL_REJECT_IND (PIN or Key Missing)")
 
@@ -182,6 +182,7 @@ def ser_recv_print_forward(conn, quiet):
 
             msg.body = bytes([llid_masked, new_len, new_opcode, error_code])
             print(f"  Final msg.body = {msg.body.hex()}")
+
 
     # don't forward empty packets
     is_empty = isinstance(msg, LlDataContMessage) and msg.data_length == 0

