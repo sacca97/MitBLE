@@ -163,8 +163,9 @@ int main(int argc, char **argv) {
             #pragma omp for schedule(static)
             for (uint64_t i = 0; i < total; ++i) {
                 // Early exit if another thread already found the key
+                #pragma omp cancellation point for
                 if (found.load(std::memory_order_relaxed)) {
-                    continue;
+                    #pragma omp cancel for
                 }
 
                 candidate_ltk = base_ltk;
