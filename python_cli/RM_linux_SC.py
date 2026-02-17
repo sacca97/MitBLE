@@ -88,7 +88,7 @@ Empty--------->
 
 # global variable to access hardware
 hw = None
-new_key_size = 0x04
+new_key_size = 0x07
 
 found_key = None                  
 _found_key_lock = threading.Lock()
@@ -126,7 +126,7 @@ skdm_from_c  = None
 skds_from_p  = None
 skd_real_cp  = None
 
-bonding = True
+bonding = False
 sent_reject = False
 LLENCREQ_body_copy = None
 LLENCREQ_event_copy = None 
@@ -1136,7 +1136,7 @@ def sock_recv_print_forward(conn, quiet,filter_changes=False):
                 try_update_session_key()
     
         change_LLENCREQ = True
-        if change_LLENCREQ:
+        if change_LLENCREQ and bonding:
             old_hdr = LLENCREQ_body_copy[0] if len(LLENCREQ_body_copy) > 0 else 0x00
             llid_masked = (old_hdr & 0b11111100) | 0x03  # LLID = 0b11 = LL Control PDU
 

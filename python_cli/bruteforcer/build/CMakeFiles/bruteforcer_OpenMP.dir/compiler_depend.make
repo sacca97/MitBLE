@@ -42,7 +42,7 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/concepts \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/range_access.h \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/cstdint \
-  /usr/lib/clang/19/include/stdint.h \
+  /usr/lib/clang/20/include/stdint.h \
   /usr/include/stdint.h \
   /usr/include/bits/libc-header-start.h \
   /usr/include/bits/types.h \
@@ -63,12 +63,12 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
   /usr/include/wchar.h \
   /usr/include/bits/floatn.h \
   /usr/include/bits/floatn-common.h \
-  /usr/lib/clang/19/include/stddef.h \
-  /usr/lib/clang/19/include/__stddef_size_t.h \
-  /usr/lib/clang/19/include/__stddef_wchar_t.h \
-  /usr/lib/clang/19/include/__stddef_null.h \
-  /usr/lib/clang/19/include/stdarg.h \
-  /usr/lib/clang/19/include/__stdarg___gnuc_va_list.h \
+  /usr/lib/clang/20/include/stddef.h \
+  /usr/lib/clang/20/include/__stddef_size_t.h \
+  /usr/lib/clang/20/include/__stddef_wchar_t.h \
+  /usr/lib/clang/20/include/__stddef_null.h \
+  /usr/lib/clang/20/include/stdarg.h \
+  /usr/lib/clang/20/include/__stdarg___gnuc_va_list.h \
   /usr/include/bits/types/wint_t.h \
   /usr/include/bits/types/mbstate_t.h \
   /usr/include/bits/types/__mbstate_t.h \
@@ -80,11 +80,11 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/exception.h \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/exception_ptr.h \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/cxxabi_init_exception.h \
-  /usr/lib/clang/19/include/__stddef_header_macro.h \
-  /usr/lib/clang/19/include/__stddef_ptrdiff_t.h \
-  /usr/lib/clang/19/include/__stddef_nullptr_t.h \
-  /usr/lib/clang/19/include/__stddef_max_align_t.h \
-  /usr/lib/clang/19/include/__stddef_offsetof.h \
+  /usr/lib/clang/20/include/__stddef_header_macro.h \
+  /usr/lib/clang/20/include/__stddef_ptrdiff_t.h \
+  /usr/lib/clang/20/include/__stddef_nullptr_t.h \
+  /usr/lib/clang/20/include/__stddef_max_align_t.h \
+  /usr/lib/clang/20/include/__stddef_offsetof.h \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/typeinfo \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/hash_bytes.h \
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/new \
@@ -134,6 +134,7 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
   /usr/include/bits/pthreadtypes.h \
   /usr/include/bits/thread-shared-types.h \
   /usr/include/bits/pthreadtypes-arch.h \
+  /usr/include/bits/atomic_wide_counter.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
   /usr/include/bits/setjmp.h \
@@ -265,33 +266,9 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
   /opt/rh/gcc-toolset-14/root/usr/include/c++/14/cstring \
   /usr/include/string.h \
   /usr/include/strings.h \
-  /usr/lib/clang/19/include/omp.h \
-  /opt/rh/gcc-toolset-14/root/usr/include/c++/14/stdlib.h \
-  /usr/lib/clang/19/include/wmmintrin.h \
-  /usr/lib/clang/19/include/emmintrin.h \
-  /usr/lib/clang/19/include/xmmintrin.h \
-  /usr/lib/clang/19/include/mmintrin.h \
-  /usr/lib/clang/19/include/mm_malloc.h \
-  /usr/lib/clang/19/include/__wmmintrin_aes.h \
-  /usr/lib/clang/19/include/__wmmintrin_pclmul.h \
-  /users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/aesni.h
+  /usr/lib/clang/20/include/omp.h \
+  /opt/rh/gcc-toolset-14/root/usr/include/c++/14/stdlib.h
 
-
-/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/aesni.h:
-
-/usr/lib/clang/19/include/__wmmintrin_pclmul.h:
-
-/usr/lib/clang/19/include/__wmmintrin_aes.h:
-
-/usr/lib/clang/19/include/mm_malloc.h:
-
-/usr/lib/clang/19/include/mmintrin.h:
-
-/usr/lib/clang/19/include/xmmintrin.h:
-
-/usr/lib/clang/19/include/emmintrin.h:
-
-/usr/lib/clang/19/include/wmmintrin.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/stdlib.h:
 
@@ -307,29 +284,21 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/timex.h:
 
-/usr/include/time.h:
-
 /usr/include/asm-generic/posix_types.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/atomic_word.h:
 
 /usr/include/bits/types/__mbstate_t.h:
 
+/usr/include/bits/stdio_lim.h:
+
 /usr/include/bits/time.h:
 
 /usr/include/asm/posix_types.h:
 
-/usr/include/asm/types.h:
-
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/basic_string.h:
 
 /usr/include/asm/bitsperlong.h:
-
-/usr/lib/clang/19/include/__stddef_wchar_t.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/localefwd.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/ostream_insert.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/ext/atomicity.h:
 
@@ -345,6 +314,10 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/ctype.h:
 
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/gthr-default.h:
+
+/usr/include/bits/locale.h:
+
 /usr/include/linux/stddef.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/clocale:
@@ -355,25 +328,25 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/hash_bytes.h:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/typeinfo:
+/usr/include/bits/mathcalls-helper-functions.h:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/gthr-default.h:
+/usr/include/openssl/configuration.h:
 
-/usr/include/bits/locale.h:
+/usr/include/time.h:
 
-/usr/lib/clang/19/include/omp.h:
+/usr/lib/clang/20/include/__stddef_ptrdiff_t.h:
 
-/usr/lib/clang/19/include/__stddef_max_align_t.h:
+/usr/include/bits/types/__sigset_t.h:
+
+/usr/lib/clang/20/include/__stdarg___gnuc_va_list.h:
+
+/usr/include/bits/types/cookie_io_functions_t.h:
 
 /usr/include/bits/types/struct_timeval.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/char_traits.h:
 
-/usr/include/linux/sched/types.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/allocator.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/exception_ptr.h:
+/usr/include/bits/atomic_wide_counter.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/cstdio:
 
@@ -395,16 +368,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/flt-eval-method.h:
 
-/usr/lib/clang/19/include/__stddef_offsetof.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/memoryfwd.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/cstddef:
-
-/usr/lib/clang/19/include/__stddef_nullptr_t.h:
-
-/usr/lib/clang/19/include/__stddef_ptrdiff_t.h:
-
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/move.h:
 
 /usr/include/gnu/stubs.h:
@@ -421,17 +384,41 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/ext/string_conversions.h:
 
-/usr/lib/clang/19/include/__stdarg___gnuc_va_list.h:
+/usr/lib/clang/20/include/stdarg.h:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_iterator_base_funcs.h:
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/cwchar:
 
-/usr/lib/clang/19/include/stdarg.h:
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/typeinfo:
+
+/usr/lib/clang/20/include/__stddef_nullptr_t.h:
+
+/usr/lib/clang/20/include/__stddef_wchar_t.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/istream.tcc:
+
+/usr/include/asm/types.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/localefwd.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/ostream_insert.h:
+
+/usr/lib/clang/20/include/__stddef_size_t.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/ios_base.h:
+
+/usr/lib/clang/20/include/__stddef_offsetof.h:
 
 /usr/include/bits/floatn-common.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/pstl/pstl_config.h:
+
+/usr/lib/clang/20/include/stddef.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/postypes.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/std_abs.h:
+
+/usr/include/bits/floatn.h:
 
 /usr/include/wchar.h:
 
@@ -445,13 +432,15 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_pair.h:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/exception:
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_iterator_base_funcs.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/c++config.h:
 
-/usr/lib/clang/19/include/__stddef_header_macro.h:
-
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/c++locale.h:
+
+/usr/include/bits/types/struct_timespec.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/basic_string.tcc:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_algobase.h:
 
@@ -460,12 +449,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 /usr/include/bits/types/error_t.h:
 
 /usr/include/tbb/tbb.h:
-
-/usr/include/features.h:
-
-/usr/include/bits/types/__FILE.h:
-
-/usr/include/bits/sched.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/tr1/poly_hermite.tcc:
 
@@ -493,19 +476,9 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/version.h:
 
-/usr/include/bits/stdio_lim.h:
+/usr/include/asm-generic/int-ll64.h:
 
-/usr/lib/clang/19/include/stddef.h:
-
-/usr/include/bits/types/struct_itimerspec.h:
-
-/usr/include/bits/struct_rwlock.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/basic_string.tcc:
-
-/usr/include/bits/types/struct_timespec.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/cwchar:
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/ext/type_traits.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/os_defines.h:
 
@@ -523,13 +496,19 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/array:
 
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/iosfwd:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_construct.h:
+
+/usr/include/linux/errno.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/tr1/special_function_util.h:
+
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/cctype:
 
 /usr/include/errno.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/tr1/legendre_function.tcc:
-
-/usr/lib/clang/19/include/__stddef_size_t.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/debug/assertions.h:
 
@@ -539,13 +518,15 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/ios:
 
+/usr/include/openssl/configuration-x86_64.h:
+
+/usr/include/linux/types.h:
+
+/usr/include/openssl/opensslconf.h:
+
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/predefined_ops.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/ostream:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/ext/type_traits.h:
-
-/usr/include/asm-generic/int-ll64.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/fstream:
 
@@ -555,9 +536,15 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/types.h:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/postypes.h:
-
 /usr/include/bits/endian.h:
+
+/usr/include/features.h:
+
+/usr/include/bits/types/__FILE.h:
+
+/usr/include/bits/sched.h:
+
+/usr/lib/clang/20/include/stdint.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/alloc_traits.h:
 
@@ -565,17 +552,7 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/iscanonical.h:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/iosfwd:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_construct.h:
-
-/usr/include/linux/errno.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/tr1/special_function_util.h:
-
-/usr/lib/clang/19/include/stdint.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/ratio:
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/exception:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/concept_check.h:
 
@@ -585,7 +562,11 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/tuple:
 
+/usr/lib/clang/20/include/omp.h:
+
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/streambuf_iterator.h:
+
+/usr/lib/clang/20/include/__stddef_header_macro.h:
 
 /usr/include/bits/long-double.h:
 
@@ -597,7 +578,15 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/time64.h:
 
+/usr/lib/clang/20/include/__stddef_null.h:
+
 /usr/include/bits/stdlib-float.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/memoryfwd.h:
+
+/usr/lib/clang/20/include/__stddef_max_align_t.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/cstddef:
 
 /usr/include/bits/types/clock_t.h:
 
@@ -615,6 +604,10 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/types/clockid_t.h:
 
+/usr/include/bits/types/struct_itimerspec.h:
+
+/usr/include/bits/struct_rwlock.h:
+
 /usr/include/bits/pthreadtypes.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/uses_allocator_args.h:
@@ -626,8 +619,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/c++io.h:
 
 /usr/include/bits/setjmp.h:
-
-/usr/include/bits/types/__sigset_t.h:
 
 /usr/include/bits/wchar.h:
 
@@ -649,6 +640,12 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/locale_classes.h:
 
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/exception_ptr.h:
+
+/usr/include/linux/sched/types.h:
+
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/allocator.h:
+
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/system_error:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/c++allocator.h:
@@ -658,8 +655,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/cxxabi_forced.h:
 
 /usr/include/bits/types/mbstate_t.h:
-
-/usr/lib/clang/19/include/__stddef_null.h:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/stl_function.h:
 
@@ -709,10 +704,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/alloca.h:
 
-/usr/include/bits/floatn.h:
-
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/std_abs.h:
-
 /usr/include/bits/wordsize.h:
 
 /usr/include/stdio.h:
@@ -722,8 +713,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/gthr.h:
 
 /usr/include/bits/types/struct_FILE.h:
-
-/usr/include/bits/types/cookie_io_functions_t.h:
 
 /usr/include/bits/stdio.h:
 
@@ -773,8 +762,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/ostream.tcc:
 
-/opt/rh/gcc-toolset-14/root/usr/include/c++/14/bits/istream.tcc:
-
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/x86_64-redhat-linux/bits/basic_file.h:
 
 /usr/include/bits/types/struct_sched_param.h:
@@ -795,10 +782,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /usr/include/bits/fp-fast.h:
 
-/usr/include/bits/mathcalls-helper-functions.h:
-
-/usr/include/openssl/configuration.h:
-
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/cstdint:
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/tr1/beta_function.tcc:
@@ -817,10 +800,6 @@ CMakeFiles/bruteforcer_OpenMP.dir/bruteforcer_OpenMP.cpp.o: /users/students/r085
 
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/tr1/poly_laguerre.tcc:
 
+/opt/rh/gcc-toolset-14/root/usr/include/c++/14/ratio:
+
 /opt/rh/gcc-toolset-14/root/usr/include/c++/14/ctime:
-
-/usr/include/linux/types.h:
-
-/usr/include/openssl/opensslconf.h:
-
-/usr/include/openssl/configuration-x86_64.h:

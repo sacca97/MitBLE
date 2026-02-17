@@ -233,7 +233,7 @@ PKG_CONFIG_EXECUTABLE:FILEPATH=/usr/bin/pkg-config
 USE_AESIN:UNINITIALIZED=ON
 
 //Enable AES-NI acceleration
-USE_AESNI:BOOL=1
+USE_AESNI:BOOL=OFF
 
 //Value Computed by CMake
 bruteforcer_suite_BINARY_DIR:STATIC=/users/students/r0852336/thesiss/Sniffle/python_cli/bruteforcer/build
@@ -393,7 +393,7 @@ FIND_PACKAGE_MESSAGE_DETAILS_OpenMP:INTERNAL=[TRUE][c ][v()]
 //Details about finding OpenMP_CXX
 FIND_PACKAGE_MESSAGE_DETAILS_OpenMP_CXX:INTERNAL=[-fopenmp=libomp][/lib64/libomp.so][/lib64/libpthread.a][v()]
 //Details about finding OpenSSL
-FIND_PACKAGE_MESSAGE_DETAILS_OpenSSL:INTERNAL=[/usr/lib64/libcrypto.so][/usr/include][cfound components: Crypto ][v3.2.2()]
+FIND_PACKAGE_MESSAGE_DETAILS_OpenSSL:INTERNAL=[/usr/lib64/libcrypto.so][/usr/include][cfound components: Crypto ][v3.5.1()]
 //Details about finding Threads
 FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //ADVANCED property for variable: OPENSSL_CRYPTO_LIBRARY

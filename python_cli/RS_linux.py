@@ -22,7 +22,7 @@ from sniffle.packet_decoder import DPacketMessage, DataMessage, LlDataContMessag
 hw = None
 _aa = 0
 
-bonding = True
+bonding = False
 seen_pairing_req = False
 
 def sigint_handler(sig, frame):
@@ -179,7 +179,7 @@ def ser_recv_print_forward(conn, quiet):
         print(f"[INJECT] Sent LL_REJECT_IND (0x06) to central: {reject_pdu.hex()}")
         
 
-        smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x09])  # L2CAP + SMP
+        smp_sec_req = bytes([0x02, 0x00, 0x06, 0x00, 0x0B, 0x2D])  # L2CAP + SMP
         #llid_masked = (old_hdr & 0b11111100) | 0x02  # LLID = 0b10 = L2CAP Start
         #msg.body = bytes([llid_masked, new_len]) + smp_sec_req
         hw.cmd_transmit(2, smp_sec_req)  # safer to skip reusing old event

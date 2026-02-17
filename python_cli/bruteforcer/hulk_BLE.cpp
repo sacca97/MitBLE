@@ -405,7 +405,6 @@ int main(int argc, char **argv) {
       printf("[!] Unsupported new_key_size = %u (must be 1..7)\n", new_key_size);
       return 1;
   }
-  
   memcpy(plaintext,  d.P.data(),   16);
   memcpy(ciphertext, d.C.data(),   16);
   memcpy(skd,        d.SKD.data(), 16);

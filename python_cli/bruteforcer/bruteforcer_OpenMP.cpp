@@ -126,6 +126,7 @@ int main(int argc, char **argv) {
     try {
         AttackData d = load_attack_data(attack_path);
 
+
         const int key_size   = static_cast<int>(d.key_size);
         const int zero_bytes = 16 - key_size;
 
@@ -135,10 +136,8 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        // Better than pow: use bit shifts (exact integer)
-        uint64_t total = (key_size == 0)
-            ? 1
-            : (1ULL << (8 * key_size));
+        // Use bit shifts (exact integer)
+        uint64_t total = (key_size == 0) ? 1 : (1ULL << (8 * key_size));
 
         std::cout << "Bruteforcing key_size=" << key_size
                   << " => " << total << " candidates\n";
@@ -193,7 +192,8 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                if (match) {
+                //match = false;
+                if (match){ 
                     // Only one thread should "win" and store the result
                     bool expected = false;
                     if (found.compare_exchange_strong(expected, true,
