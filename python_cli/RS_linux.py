@@ -184,6 +184,7 @@ def ser_recv_print_forward(conn, quiet):
         #msg.body = bytes([llid_masked, new_len]) + smp_sec_req
         hw.cmd_transmit(2, smp_sec_req)  # safer to skip reusing old event
         bonding = False
+        return 
 
     if not empty and isinstance(msg, PacketMessage) and False:
         if is_smp_pairing_req(msg.body) and seen_pairing_req: 
