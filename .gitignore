@@ -1,3 +1,6 @@
 **/build
 **/cc2538-bsl
 **/experiments/*
+**/__pycache__
+**/report.md
+**/test.py
