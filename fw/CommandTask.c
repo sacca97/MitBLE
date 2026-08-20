@@ -143,7 +143,8 @@ static void commandTaskFunction(UArg arg0, UArg arg1)
             if (ret != 4) continue;
             uint16_t intervalMs;
             memcpy(&intervalMs, msgBuf + 2, 2);
-            if (intervalMs < 20) continue;
+            // Deliberately permit non-compliant advertising intervals down to 1 ms.
+            if (intervalMs == 0) continue;
             setAdvInterval(intervalMs);
             break;
         }

@@ -559,8 +559,8 @@ static void radioTaskFunction(UArg arg0, UArg arg1)
 
             afterConnEvent(true, status == 0);
         } else if (snifferState == ADVERTISING) {
-            // slightly "randomize" advertisement timing as per spec
-            uint32_t sleep_ms = s_advIntervalMs + (RF_getCurrentTime() & 0x7);
+            // Do not add a random advDelay to the requested interval.
+            uint32_t sleep_ms = s_advIntervalMs;
             RadioWrapper_advertise3(indicatePacket, ourAddr, ourAddrRandom,
                     s_advData, s_advLen, s_scanRspData, s_scanRspLen, s_advMode);
             // don't sleep if we had a connection established
@@ -575,8 +575,8 @@ static void radioTaskFunction(UArg arg0, UArg arg1)
                 RadioWrapper_scanLegacy(statChan, 0, true, ourAddr, ourAddrRandom,
                         validateCrc, indicatePacket);
         } else if (snifferState == ADVERTISING_EXT) {
-            // slightly "randomize" advertisement timing as per spec
-            uint32_t sleep_ms = s_advIntervalMs + (RF_getCurrentTime() & 0x7);
+            // Do not add a random advDelay to the requested interval.
+            uint32_t sleep_ms = s_advIntervalMs;
             RadioWrapper_advertiseExt3(indicatePacket, ourAddr, ourAddrRandom,
                     s_advData, s_advLen, s_advExtMode, s_primaryAdvPhy,
                     s_secondaryAdvPhy, s_secondaryAdvChan, s_adi);
